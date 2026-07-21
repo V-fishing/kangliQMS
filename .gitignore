@@ -3,22 +3,24 @@ node_modules
 .pnp
 .pnp.js
 
-# Package manager lock files (keep package-lock.json if needed)
-# Uncomment the next line if you want to ignore lock files
-# package-lock.json
-# yarn.lock
-# pnpm-lock.yaml
-
 # Build output
 dist
 dist-ssr
 build
 *.tgz
+*.tsbuildinfo
+
+# Bundle analyzer / 构建报告
+stats.html
+report.html
+*.report.html
 
 # Local env files
+# 注意:.env.development / .env.production 为仓库共享配置,需跟踪;仅忽略本地覆盖
 .env
 .env.local
 .env.*.local
+*.local
 
 # Log files
 *.log
@@ -55,15 +57,15 @@ coverage
 /test-results/
 /playwright-report/
 /playwright/.cache/
+/blob-report/
+/playwright/.cache/
 
 # Vitest
 *.vitest-temp.json
 
-# TypeScript
-*.tsbuildinfo
-
 # Vite
 .vite
+.vite-cache
 
 # PWA
 **/public/sw.js
@@ -77,3 +79,5 @@ login-debug.png
 .parcel-cache
 .eslintcache
 .stylelintcache
+.tmp
+.tmp-*

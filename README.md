@@ -27,7 +27,7 @@
 ## 目录结构
 
 ```
-QMS-fronted/
+kangliQMS/                        # git clone 后的仓库根目录
 ├── README.md
 ├── CLAUDE.md                     # Claude Code 操作指引
 ├── 康立QMS-完整版.html           # 早期静态原型（仅供参考）
@@ -72,7 +72,7 @@ QMS-fronted/
 
 ```bash
 # 进入前端工程目录（所有命令均在此目录下执行）
-cd QMS-fronted/qms-web
+cd kangliQMS/qms-web
 
 # 安装依赖（二选一）
 pnpm install        # 推荐，与 CI 一致
@@ -94,7 +94,7 @@ pnpm preview
 - 接口代理：`/api` -> `http://localhost:8080`（后端服务地址，可在 `vite.config.ts` 中修改）
 - 环境变量：`.env.development` / `.env.production`（`VITE_API_BASE`、`VITE_OSS_BASE`、`VITE_SSE_BASE`）
 
-> 当前阶段接口层返回本地 Mock 数据，无需后端即可完整运行前端；后端就绪后将 `src/api/modules/*.ts` 中的 Mock 返回替换为 `request` 调用即可。
+> 接口层已对接真实后端（`src/api/modules/*.ts` 通过 `src/utils/request.ts` 调用后端 `/api/v1/...` 接口）。完整运行需先启动后端服务（见后端仓库 README）;后端未就绪时，相关页面会因接口无响应而显示空数据，但前端工程本身可独立构建。
 
 ---
 
@@ -139,9 +139,9 @@ pnpm exec playwright test tests/e2e/fia-entry.spec.ts     # 单个 E2E
 
 `src/router/guard.ts` 实现三态流转：未登录 → `/login`；已登录未选公司 → `/company-select`；已登录已选公司 → 正常放行。`companyStore` 维护公司上下文（具体公司或 `GROUP` 集团总览），支持顶栏免重登切换公司 / 集团。
 
-### 接口层（Mock 占位 → 真实接口）
+### 接口层（已对接真实后端）
 
-`src/api/modules/*.ts` 各方法当前直接返回 Mock 数据；后端就绪后替换为 `src/utils/request.ts` 封装的 `request.get/post/...`，函数签名不变、视图无需改动。`request.ts` 统一处理 JWT 注入、`X-Trace-Id`、业务码、401 跳登录。
+`src/api/modules/*.ts` 各方法通过 `src/utils/request.ts` 封装的 `request.get/post/...` 调用后端 `/api/v1/...` 接口，函数签名稳定、视图不直接依赖后端 DTO 形状。`request.ts` 统一处理 JWT 注入、`X-Trace-Id`、业务码（`R<T>={code,msg,data}`，`code=0` 成功）、401 跳登录。后端暂无对应接口的项返回空结构兜底，绝不返回 Mock 业务数据。
 
 ### 其他要点
 
@@ -159,6 +159,7 @@ pnpm exec playwright test tests/e2e/fia-entry.spec.ts     # 单个 E2E
 | SPC | `views/spc` | 统计过程控制 / 过程能力 |
 | NCM | `views/ncm` | 不合格品 / 不良管理 |
 | SQM | `views/sqm` | 供应商质量管理 |
+| Archive | `views/archive` | 检验记录归档与查询 |
 | ASM | `views/asm` | 售后管理 |
 | TLM | `views/tlm` | 工装管理 |
 | MSM | `views/msm` | 计量管理 |
@@ -198,6 +199,18 @@ git commit -m "feat: 新增 FIA 任务列表页"
 ## CI
 
 `.github/workflows/ci.yml` 在 push / PR 到 `main` / `develop` 时触发，使用 pnpm 9 + Node 20，依次执行：依赖安装 → `lint:check` → `lint:style` → `type-check` → `test:cov` → `build:only` → 术语规则复扫 `src/locales/`。
+
+---
+
+## 源码托管
+
+- 仓库：`https://github.com/V-fishing/kangliQMS.git`
+- 克隆：
+  ```bash
+  git clone https://github.com/V-fishing/kangliQMS.git
+  cd kangliQMS/qms-web
+  ```
+- 提交信息遵循 Commitlint 约定式提交（见上节）。本仓库已配置 `.gitignore`，自动忽略 `node_modules/`、`dist/`、`*.log`、`.env.local`、`.eslintcache` 等依赖、构建产物与本地文件，**不会**提交 `node_modules` 与本地环境覆盖配置。
 
 ---
 
