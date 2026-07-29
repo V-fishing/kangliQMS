@@ -28,6 +28,18 @@ export interface SpcSubgroup {
   shift?: ShiftType
   /** 命中判异规则编号，如 ① / ③ */
   outlierRule?: string
+  /** 子组主键（溯源用） */
+  id?: string
+  /** 关联参数 ID（用于映射参数名） */
+  paramId?: string
+  /** 合格判定：合格 / 不合格 */
+  judge?: string
+  /** 数据来源：fia = 首件联动写入，manual/空 = 正常采集 */
+  dataSource?: string
+  /** 关联工单（首件联动时即首件工单） */
+  woNo?: string
+  /** 关联批次（首件联动时即首件批次） */
+  batchNo?: string
 }
 
 export interface SpcLimit {
@@ -37,6 +49,9 @@ export interface SpcLimit {
   rUcl?: number
   rCl?: number
   rLcl?: number
+  baselineSource?: string
+  nSubgroups?: number
+  insufficient?: boolean   // SR-SPC-007:子组<25 基线未建立
 }
 
 export interface SpcMark {
@@ -112,12 +127,14 @@ export interface SpcControlData {
 
 /** 数据采集任务（对应 HTML MOCKX.spc.collectTasks） */
 export interface SpcCollectTask {
+  id: string
   par: string
   proc: string
   freq: string
   last: string
   due: string
-  st: '待采集' | '已完成'
+  st: '待采集' | '已完成' | '缺失'
+  isPlannedDowntime?: boolean
 }
 
 /** 导入历史记录（对应 HTML MOCKX.spc.importHistory） */
@@ -135,8 +152,35 @@ export interface SpcImportRecord {
 
 /** 判异规则配置（对应 HTML MOCKX.spc.rulesCfg） */
 export interface SpcRuleCfg {
+  /** 展示用规则编码（如 ①/R1） */
   id: string
+  /** 后端真实主键 id，用于启停接口 */
+  rid?: string
   name: string
   lvl: '报警' | '预警'
   on: boolean
+}
+
+/** SPC 通知渠道（对应后端 ops.spc_notify_channel） */
+export interface SpcNotifyChannel {
+  id: string
+  /** 渠道编码：wecom / email / sms / dingtalk ... */
+  channel: string
+  /** 是否启用 */
+  isEnabled: boolean
+  configJson?: string
+}
+
+/** SPC 推送通知记录（报警触发后按启用渠道生成，留痕） */
+export interface SpcNotifyRecord {
+  id: string
+  alarmId: string
+  channel: string
+  channelName?: string
+  message: string
+  /** SENT / FAILED / PENDING */
+  status: string
+  sentAt?: string
+  error?: string
+  createdAt?: string
 }

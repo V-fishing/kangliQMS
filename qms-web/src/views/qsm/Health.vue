@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
+useChartResize(() => [barInst])
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
-import { healthDims, improvementSuggestions, qsmKpi } from '@/mock/qsm'
-import type { HealthDim, ImprovementSuggestion } from '@/types/qsm'
+import { BANNERS } from '@/config/banners'
+import { qsmApi } from '@/api'
+import type { HealthDim, ImprovementSuggestion, QsmKpi } from '@/types/qsm'
 
 const authStore = useAuthStore()
 const banner = BANNERS.qsm?.[authStore.role] || {
@@ -13,16 +15,22 @@ const banner = BANNERS.qsm?.[authStore.role] || {
   desc: '多维度体系健康度汇聚、预警与改进建议闭环',
 }
 
-const dims = ref<HealthDim[]>(JSON.parse(JSON.stringify(healthDims)))
-const suggestions = ref<ImprovementSuggestion[]>(
-  JSON.parse(JSON.stringify(improvementSuggestions)),
-)
+const dims = ref<HealthDim[]>([])
+const suggestions = ref<ImprovementSuggestion[]>([])
+const kpi = ref<QsmKpi>({
+  auditPlan: 0,
+  auditDoing: 0,
+  ncOpen: 0,
+  ncSevere: 0,
+  healthScore: 0,
+  rectifyRate: 0,
+})
 
 // 是否低于阈值（预警）
 function isWarn(d: HealthDim) {
   return d.value < d.threshold
 }
-const warnCount = ref(dims.value.filter(isWarn).length)
+const warnCount = computed(() => dims.value.filter(isWarn).length)
 
 const stMap: Record<string, string> = {
   已采纳: 'g', 未采纳: 'gray', 采纳: 'g',
@@ -72,7 +80,20 @@ function barOption() {
   }
 }
 
-onMounted(() => {
+async function loadAll() {
+  const [k, d, s] = await Promise.all([
+    qsmApi.getKpi(),
+    qsmApi.getHealthDims(),
+    qsmApi.getImprovementSuggestions(),
+  ])
+  kpi.value = k
+  dims.value = d
+  suggestions.value = s
+  if (barInst) barInst.setOption(barOption())
+}
+
+onMounted(async () => {
+  await loadAll()
   if (barRef.value) {
     barInst = echarts.init(barRef.value)
     barInst.setOption(barOption())
@@ -93,12 +114,12 @@ onBeforeUnmount(() => barInst?.dispose())
 
     <!-- KPI 行（对齐 HTML kpi-row，6 项） -->
     <div class="kpi-row" style="grid-template-columns: repeat(3, 1fr)">
-      <KpiCard label="内审计划中" :value="qsmKpi.auditPlan" unit="项" />
-      <KpiCard label="内审进行中" :value="qsmKpi.auditDoing" unit="项" />
-      <KpiCard label="未关闭不符合项" :value="qsmKpi.ncOpen" unit="项" status="warn" />
-      <KpiCard label="严重未关闭" :value="qsmKpi.ncSevere" unit="项" status="bad" />
-      <KpiCard label="体系综合健康度" :value="qsmKpi.healthScore" unit="分" status="ok" />
-      <KpiCard label="内审整改完成率" :value="qsmKpi.rectifyRate" unit="%" />
+      <KpiCard label="内审计划中" :value="kpi.auditPlan" unit="项" />
+      <KpiCard label="内审进行中" :value="kpi.auditDoing" unit="项" />
+      <KpiCard label="未关闭不符合项" :value="kpi.ncOpen" unit="项" status="warn" />
+      <KpiCard label="严重未关闭" :value="kpi.ncSevere" unit="项" status="bad" />
+      <KpiCard label="体系综合健康度" :value="kpi.healthScore" unit="分" status="ok" />
+      <KpiCard label="内审整改完成率" :value="kpi.rectifyRate" unit="%" />
     </div>
 
     <!-- 预警提示 -->
@@ -114,8 +135,7 @@ onBeforeUnmount(() => barInst?.dispose())
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>体系健康度维度对比（当前值 vs 预警阈值）</h3>
-        <span class="sr-tag">SR-QSM-012</span><span class="sr-tag">SR-QSM-013</span>
-      </div>
+        </div>
       <div class="qms-card__body"><div ref="barRef" class="chart-container"></div></div>
     </div>
 
@@ -123,8 +143,7 @@ onBeforeUnmount(() => barInst?.dispose())
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>维度明细与预警</h3>
-        <span class="sr-tag">SR-QSM-014</span>
-      </div>
+        </div>
       <div class="qms-card__body" style="padding: 0">
         <el-table :data="dims" border size="small">
           <el-table-column prop="name" label="维度" min-width="150" />
@@ -153,8 +172,7 @@ onBeforeUnmount(() => barInst?.dispose())
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>体系改进建议与决策跟踪</h3>
-        <span class="sr-tag">SR-QSM-015</span><span class="sr-tag">SR-QSM-016</span><span class="sr-tag">SR-QSM-017</span><span class="sr-tag">SR-QSM-018</span>
-      </div>
+        </div>
       <div class="qms-card__body" style="padding: 0">
         <el-table :data="suggestions" border size="small">
           <el-table-column prop="id" label="编号" width="120" />

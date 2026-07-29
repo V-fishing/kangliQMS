@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
 import type { NcmDefectHeatmap } from '@/types/ncm'
 
 const props = withDefaults(defineProps<{
@@ -12,6 +13,7 @@ const props = withDefaults(defineProps<{
 
 const chartRef = ref<HTMLDivElement>()
 let inst: echarts.ECharts | null = null
+useChartResize(() => [inst])
 
 function buildOption() {
   const max = Math.max(...props.data.data.map((d) => d[2]))

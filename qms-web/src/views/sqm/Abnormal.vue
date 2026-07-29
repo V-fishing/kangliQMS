@@ -1,21 +1,52 @@
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useRouter, useRoute } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
+import { useCompanyStore } from '@/stores/company'
 import type { RoleId } from '@/mock/roles'
-import { BANNERS } from '@/mock/roles'
-import { abnormals, d8Links, suppliers } from '@/mock/sqm'
-import type { Abnormal, D8Link, MeasureLog, Attachment } from '@/types/sqm'
+import { BANNERS } from '@/config/banners'
+import { sqmApi } from '@/api'
+import type { Abnormal, D8Link, MeasureLog, Attachment, Supplier, Capa } from '@/types/sqm'
 
 const authStore = useAuthStore()
+const router = useRouter()
+const route = useRoute()
+const overdueExpanded = ref(false)
+const d8Expanded = ref(false)
 const banner = BANNERS.sqm?.[authStore.role] || {
   title: 'SQM · 来料异常整改',
   desc: '来料异常处置、整改执行记录、连续三批验证与闭环归档（SR-CAR-007~012）',
 }
 
-// 数据源（可变，模拟 HTML 的 MOCK 状态流转）
-const list = ref<Abnormal[]>([...abnormals])
-const d8List = computed(() => Object.entries(d8Links) as [string, D8Link][])
+// 数据源（异步加载后端真实数据）
+const list = ref<Abnormal[]>([])
+const suppliers = ref<Supplier[]>([])
+const d8LinkMap = ref<Record<string, D8Link>>({})
+const d8List = computed(() => Object.entries(d8LinkMap.value) as [string, D8Link][])
+const capaList = ref<Capa[]>([])
+
+// 异步加载
+async function loadData() {
+  try {
+  const [supList, abnList, d8Map, capaData] = await Promise.all([
+    sqmApi.getSuppliers(),
+    sqmApi.getAbnormals(),
+    sqmApi.getD8Links(),
+    sqmApi.getCapaList(),
+  ])
+  suppliers.value = supList
+  const supMap: Record<string, Supplier> = {}
+  supList.forEach((s) => { supMap[s.id] = s })
+  list.value = abnList.map((a) => ({ ...a, supName: a.supName || supMap[a.supId]?.name || a.supId }))
+  d8LinkMap.value = d8Map
+  capaList.value = capaData
+  tryOpenFromQuery()
+  } catch (e) {
+    // 错误已由 request 拦截器统一提示
+  }
+}
+onMounted(loadData)
 
 // 角色门控
 const canReport = (['inspector', 'sqe', 'shiftleader', 'qmanager', 'sysadmin'] as RoleId[]).includes(authStore.role)
@@ -46,6 +77,9 @@ const filtered = computed(() => {
 // 药丸配色
 function statusPill(s: Abnormal['status']): string {
   return { 待处理: 'y', 整改中: 'b', 待验证: 'p', 三批验证: 'o', 已关闭: 'g' }[s] || 'gray'
+}
+function capaStatusPill(s: string): string {
+  return { 待启动: 'y', 原因分析: 'b', 措施制定: 'p', 实施验证: 'o', 效果确认: 'o', 已关闭: 'g' }[s] || 'gray'
 }
 function levelPill(l: Abnormal['level']): string {
   return l === '严重' ? 'r' : 'y'
@@ -103,10 +137,65 @@ const upgradeRows = [
 // ===== 当前处理中的异常 =====
 const current = ref<Abnormal | null>(null)
 const handleVisible = ref(false)
-function openHandle(id: string) {
+async function openHandle(id: string) {
   const a = list.value.find((x) => x.id === id)
-  if (a) { current.value = a; handleVisible.value = true }
+  if (!a) return
+  current.value = a
+  handleVisible.value = true
+  // V21: 加载后端持久化的整改记录（措施 + 三批验证）
+  try {
+    const detail = await sqmApi.loadAbnormalRectification(id)
+    if (detail?.measures) measureLogs.value = detail.measures.map((m: any) => ({
+      id: m.id, seq: m.seq, content: m.content || '', operator: m.operator || '',
+      completeDate: m.completeDate || '', status: m.status || '待完成',
+    }))
+    if (detail?.batchVerifies) batchTrack.value = detail.batchVerifies.map((b: any) => ({
+      id: b.id, batchNo: b.batchNo || '', result: b.result || '待验证',
+      verifyDate: b.verifyDate || '',
+    }))
+  } catch (_) {}
 }
+/** V21: 序列化当前整改状态并持久化到后端 */
+async function syncRectification() {
+  if (!current.value) return
+  try {
+    await sqmApi.saveAbnormalRectification(current.value.id, {
+      abnormal: {
+        id: current.value.id,
+        status: current.value.status,
+        disposal: current.value.disposal,
+        disposalRemark: current.value.disposalRemark,
+        noticeDate: current.value.noticeDate ?? null,
+        noticeContent: current.value.noticeContent ?? '',
+        planDate: current.value.planDate ?? null,
+        extensionApproved: current.value.extensionApproved ?? false,
+        extensionDate: current.value.extensionDate ?? null,
+        verifyResult: current.value.verifyResult ?? '',
+        verifyComment: current.value.verifyComment ?? '',
+        verifyDate: current.value.verifyDate ?? null,
+        verifyBy: current.value.verifyBy ?? '',
+        returnReason: current.value.returnReason ?? '',
+        closeDate: current.value.closeDate ?? null,
+        closeAuditor: current.value.closeAuditor ?? '',
+      },
+      measures: measureLogs.value.map((m) => ({
+        seq: m.seq, content: m.content, operator: m.operator,
+        completeDate: m.completeDate || null, status: m.status || '待完成',
+      })),
+      batchVerifies: batchTrack.value.map((b) => ({
+        batchNo: b.batchNo, result: b.result, verifyDate: b.verifyDate || null,
+      })),
+    })
+  } catch (_) {}
+}
+// 从总览看板「详情」下钻：?id= 自动打开该异常详情
+function tryOpenFromQuery() {
+  const id = route.query.id as string | undefined
+  if (id) openHandle(id)
+}
+watch(() => route.query.id, () => tryOpenFromQuery())
+/** V21: 异常处理弹窗关闭时自动持久化整改状态（防止刷新丢失措施/通知/验证等） */
+watch(handleVisible, (v) => { if (!v) syncRectification() })
 
 // 上报异常
 const reportVisible = ref(false)
@@ -116,25 +205,37 @@ function openReport() {
   reportForm.desc = ''; reportForm.qty = 1; reportForm.level = '严重'; reportForm.triggerRule = '一键即触发'
   reportVisible.value = true
 }
-function submitReport() {
+async function submitReport() {
   if (!reportForm.lotId || !reportForm.supId || !reportForm.partNo || !reportForm.desc) {
     ElMessage.warning('请填写批次号、供应商、物料料号与异常描述')
     return
   }
-  const sup = suppliers.find((s) => s.id === reportForm.supId)
-  const id = `ABN-${new Date().getFullYear()}-${String(list.value.length + 1).padStart(3, '0')}`
-  list.value.unshift({
-    id, lotId: reportForm.lotId, supId: reportForm.supId, supName: sup?.name || reportForm.supId,
-    partNo: reportForm.partNo, partName: reportForm.partNo, desc: reportForm.desc, qty: reportForm.qty,
-    level: reportForm.level, date: new Date().toISOString().slice(0, 10), handler: authStore.currentRole?.name || '—',
-    status: '待处理', d8Id: null, capaId: null, noticeSent: false, noticeDate: null, noticeContent: null,
-    planDate: null, extensionApproved: false, extensionDate: null, measures: null, measuresDate: null, measuresContent: null,
-    measureLogs: [], verifyResult: null, verifyDate: null, verifyComment: null, returnReason: null,
-    batchTrack: [], closeDate: null, closeAuditor: null, archived: false, notify7: false, notify14: false, notify21: false, overdueDays: 0,
-    triggerRule: reportForm.triggerRule,
-  })
-  reportVisible.value = false
-  ElMessage.success('异常已上报，请在异常列表中手动发起整改')
+  try {
+    await sqmApi.createAbnormal({
+      lotId: reportForm.lotId,
+      supplierId: reportForm.supId,
+      partNo: reportForm.partNo,
+      partName: reportForm.partNo,
+      description: reportForm.desc,
+      qty: reportForm.qty,
+      level: reportForm.level,
+      occurDate: new Date().toISOString().slice(0, 10),
+      status: '待处理',
+    })
+    reportVisible.value = false
+    ElMessage.success('异常已上报')
+    // Flow 6: 严重异常自动提示发起现场审核
+    if (reportForm.level === '严重') {
+      try {
+        await ElMessageBox.confirm('严重来料异常建议同步发起现场审核，是否立即创建审核计划？', '自动触发审核', { confirmButtonText: '立即创建', cancelButtonText: '稍后' })
+        router.push({ path: '/sqm/audit', query: { supId: reportForm.supId, from: 'abnormal', level: '严重' } })
+      } catch { /* 用户取消，不做跳转但仍需刷新列表 */ }
+    }
+    await loadData()
+  } catch (e) {
+    // 错误已由 request 拦截器统一提示
+    ElMessage.error('上报失败，请稍后重试')
+  }
 }
 
 // 推送整改通知（SR-CAR-006，并设置计划完成日期）
@@ -288,18 +389,69 @@ const relatedHistory = computed(() => {
 
 // 触发 CAPA
 const capaVisible = ref(false)
+const capaMode = ref<'create' | 'view'>('create')
+const capaAbnId = ref('')
+const currentCapa = ref<Capa | null>(null)
 const capaId = ref('')
 const capaForm = reactive({ type: '纠正措施', problem: '', rootcause: '', plan: '', owner: '', deadline: '' })
 function openCapa(id: string) {
   const a = list.value.find((x) => x.id === id)
-  capaId.value = a?.d8Id || ''
-  capaForm.type = '纠正措施'; capaForm.problem = ''; capaForm.rootcause = ''
-  capaForm.plan = ''; capaForm.owner = ''; capaForm.deadline = ''
+  if (!a) return
+  capaAbnId.value = a.id
+  capaId.value = a.d8Id || ''
+  // 优先复用已存在（D4 自动触发 / 手动创建）的 CAPA
+  const existing = capaList.value.find(
+    (c) => c.id === a.capaId || c.d8Id === a.d8Id || c.abnormalId === a.id,
+  )
+  if (existing) {
+    capaMode.value = 'view'
+    currentCapa.value = existing
+    capaForm.type = existing.type
+    capaForm.problem = existing.problem
+    capaForm.rootcause = existing.rootcause || ''
+    capaForm.plan = existing.corrective?.action || ''
+    capaForm.owner = existing.owner || ''
+    capaForm.deadline = existing.dueDate || ''
+  } else {
+    capaMode.value = 'create'
+    currentCapa.value = null
+    capaForm.type = '纠正措施'
+    capaForm.problem = a.desc || ''
+    capaForm.rootcause = ''
+    capaForm.plan = ''
+    capaForm.owner = ''
+    capaForm.deadline = ''
+  }
   capaVisible.value = true
 }
-function submitCapa() {
-  capaVisible.value = false
-  ElMessage.success('CAPA已触发并关联到8D流程')
+async function submitCapa() {
+  try {
+    if (capaMode.value === 'view' && currentCapa.value) {
+      await sqmApi.closeCapa(currentCapa.value.id)
+      ElMessage.success('CAPA 已闭环，已级联关闭关联的 8D 与来料异常单')
+    } else {
+      const a = list.value.find((x) => x.id === capaAbnId.value)
+      if (!a) { capaVisible.value = false; return }
+      await sqmApi.createCapa({
+        abnormalId: a.id,
+        d8Id: a.d8Id || undefined,
+        orgId: useCompanyStore().currentOrgId || '',
+        capaType: capaForm.type,
+        issue: capaForm.problem,
+        rootcause: capaForm.rootcause,
+        actionPlan: capaForm.plan,
+        owner: capaForm.owner || 'SQE',
+        dueDate: capaForm.deadline,
+        triggerType: a.d8Id ? '8D' : 'SQM异常',
+        triggerStage: 'D4',
+      })
+      ElMessage.success('CAPA 已发起并关联到整改流程')
+    }
+    capaVisible.value = false
+    await loadData()
+  } catch (e) {
+    // 错误已由 request 拦截器统一提示
+  }
 }
 
 // 处置措施（待处理）
@@ -311,19 +463,87 @@ function submitDisposal() {
   handleVisible.value = false
   ElMessage.success('处置已提交')
 }
-function start8D() {
+async function start8D() {
   if (!current.value) return
-  if (!current.value.d8Id) current.value.d8Id = 'D8-' + current.value.id
-  handleVisible.value = false
-  ElMessage.success('已手动发起8D流程')
+  try {
+    const report = await sqmApi.launch8d(current.value.id, {
+      issue: current.value.desc || current.value.partName || '来料异常',
+      severity: current.value.level || '一般',
+      team: 'SQE整改小组',
+    })
+    ElMessage.success(`已发起 8D（${report.d8No || report.id}），已关联本异常单`)
+    handleVisible.value = false
+    await loadData()
+    if (report.id) {
+      // 跳转到 8D 整改模块并定位到新建的 8D
+      router.push({ name: 'Ncm8D', query: { focus: report.id } })
+    }
+  } catch (e) {
+    // 错误已由 request 拦截器统一提示
+  }
 }
-function startCapa() {
+/** 跳转 8D 整改模块查看关联的 8D（focus=报告Id） */
+function go8D(reportId?: string) {
+  if (!reportId && !current.value?.d8Id) return
+  const id = reportId || current.value?.d8Id
+  router.push({ name: 'Ncm8D', query: { focus: id } })
+}
+async function startCapa() {
+  if (!current.value) return
+  try {
+    await sqmApi.createCapa({
+      abnormalId: current.value.id,
+      capaType: '纠正措施',
+      issue: current.value.desc || '来料异常整改',
+      owner: 'SQE',
+      triggerType: 'SQM异常',
+      dueDate: new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10),
+    })
+    ElMessage.success('已直接发起 CAPA 并关联异常单')
+    handleVisible.value = false
+    await loadData()
+  } catch (e) {
+    // 错误已由 request 拦截器统一提示
+  }
+}
+/** 从异常处理弹窗发起现场审核（Flow 4: 来料异常→现场审核） */
+function triggerAudit() {
   if (!current.value) return
   handleVisible.value = false
-  ElMessage.success('已手动发起CAPA流程')
+  router.push({
+    path: '/sqm/audit',
+    query: {
+      supId: current.value.supId,
+      supName: current.value.supName,
+      from: 'abnormal',
+      abnormalId: current.value.id,
+    },
+  })
+}
+/** 推进 8D 当前阶段（D4 触发 CAPA，D8 闭环） */
+async function advance8d(id: string, stage: string) {
+  try {
+    await sqmApi.advance8d(id, stage)
+    ElMessage.success(`8D ${stage} 阶段已推进`)
+    await loadData()
+  } catch (e) {
+    // 错误已由 request 拦截器统一提示
+  }
+}
+/** 计算 8D 下一阶段 */
+function nextStage(s: string): string {
+  const i = ['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8'].indexOf(s)
+  return i < 0 || i >= 7 ? '完成(D8)' : ['D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8'][i]
 }
 function toast(msg: string) {
   ElMessage.success(msg)
+}
+/** 手动触发重复问题升级扫描（≥2次→升级，≥3次→降份额） */
+async function triggerEscalation() {
+  try {
+    await sqmApi.triggerEscalation()
+    ElMessage.success('重复问题升级扫描已触发：≥2次异常→升级记录，≥3次→自动降份额 5%')
+  } catch (_) {}
 }
 </script>
 
@@ -337,32 +557,37 @@ function toast(msg: string) {
       </div>
     </div>
 
-    <!-- 工具栏 -->
-    <div class="toolbar">
-      <select v-model="fLevel" class="qms-select">
-        <option value="">全部等级</option><option>严重</option><option>一般</option>
-      </select>
-      <select v-model="fStatus" class="qms-select">
-        <option value="">全部状态</option><option>待处理</option><option>整改中</option><option>待验证</option><option>三批验证</option><option>已关闭</option>
-      </select>
-      <select v-model="fSup" class="qms-select">
-        <option value="">全部供应商</option>
-        <option v-for="s in suppliers" :key="s.id" :value="s.id">{{ s.name }}</option>
-      </select>
-      <input v-model="fSearch" type="text" class="qms-input" placeholder="搜索异常单号或物料..." />
-      <span class="sp" />
-      <button v-if="canReport" class="btn pri" @click="openReport">+ 上报异常</button>
+    <!-- KPI 概览卡片 -->
+    <div class="kpi-row">
+      <div class="kpi-card">
+        <span class="kpi-num">{{ list.length }}</span><span class="kpi-label">总异常</span>
+      </div>
+      <div class="kpi-card warn">
+        <span class="kpi-num">{{ list.filter((a) => a.status === '待处理').length }}</span><span class="kpi-label">待处理</span>
+      </div>
+      <div class="kpi-card danger">
+        <span class="kpi-num">{{ list.filter((a) => a.level === '严重').length }}</span><span class="kpi-label">严重</span>
+      </div>
+      <div class="kpi-card alert">
+        <span class="kpi-num">{{ list.filter((a) => calcOverdue(a) > 0 && a.status !== '已关闭').length }}</span><span class="kpi-label">超期</span>
+      </div>
+      <div class="kpi-card done">
+        <span class="kpi-num">{{ list.filter((a) => a.status === '已关闭').length }}</span><span class="kpi-label">已关闭</span>
+      </div>
     </div>
 
-    <!-- 0. 超期预警与升级通知（SR-CAR-010 / SR-CAR-011） -->
+    <!-- 工具栏整合到「来料异常记录」卡片 header（按 FMEA 统一设计） -->
+
+
+    <!-- 超期预警（可折叠） -->
     <div class="qms-card" v-if="overdueList.length">
-      <div class="qms-card__header">
-        <h3>超期预警与升级通知 <span class="sr-tag" title="SR-CAR-010,SR-CAR-011">SR-CAR-010,011</span></h3>
+      <div class="qms-card__header" style="cursor:pointer" @click="overdueExpanded = !overdueExpanded">
+        <h3>{{ overdueExpanded ? '▼' : '▶' }} 超期预警与升级通知</h3>
         <span class="badge r">{{ overdueList.length }} 单超期</span>
       </div>
-      <div class="qms-card__body" style="padding: 0; overflow-x: auto">
+      <div v-if="overdueExpanded" class="qms-card__body sticky-wrap">
         <table class="tbl">
-          <thead><tr><th>异常单号</th><th>供应商</th><th>状态</th><th>超期情况</th><th>通知状态</th><th>操作</th></tr></thead>
+          <thead><tr><th>异常单号</th><th>供应商</th><th>状态</th><th>超期情况</th><th>通知状态</th><th class="col-fixed">操作</th></tr></thead>
           <tbody>
             <tr v-for="a in overdueList" :key="a.id">
               <td>{{ a.id }}</td>
@@ -377,7 +602,7 @@ function toast(msg: string) {
                 <span class="ntag" :class="a.notify14 ? 'done' : 'todo'">经理·14天{{ a.notify14 ? '✓' : '未发' }}</span>
                 <span class="ntag" :class="a.notify21 ? 'done' : 'todo'">总监·21天{{ a.notify21 ? '✓' : '未发' }}</span>
               </td>
-              <td>
+              <td class="col-fixed">
                 <button class="btn sm" @click="openHandle(a.id)">处理</button>
                 <button class="btn sm ghost" @click="sendNotify(a, 1)" v-if="escalateLevel(a) >= 1 && !a.notify7">通知SQE</button>
                 <button class="btn sm ghost" @click="sendNotify(a, 2)" v-if="escalateLevel(a) >= 2 && !a.notify14">升级经理</button>
@@ -392,13 +617,35 @@ function toast(msg: string) {
 
     <!-- 1. 来料异常记录 -->
     <div class="qms-card">
-      <div class="qms-card__header"><h3>来料异常记录 <span class="sr-tag" title="SR-CAR-001,002,003">SR-CAR-001,002,003</span></h3></div>
-      <div class="qms-card__body" style="padding: 0; overflow-x: auto">
+      <div class="qms-card__header">
+        <h3>来料异常记录</h3>
+        <el-select v-model="fLevel" placeholder="等级" style="width:108px">
+          <el-option label="全部" value="" />
+          <el-option label="严重" value="严重" />
+          <el-option label="一般" value="一般" />
+        </el-select>
+        <el-select v-model="fStatus" placeholder="状态" style="width:130px">
+          <el-option label="全部状态" value="" />
+          <el-option label="待处理" value="待处理" />
+          <el-option label="整改中" value="整改中" />
+          <el-option label="待验证" value="待验证" />
+          <el-option label="三批验证" value="三批验证" />
+          <el-option label="已关闭" value="已关闭" />
+        </el-select>
+        <div class="grow"></div>
+        <input v-model="fSearch" type="text" class="qms-input" placeholder="搜索异常单号..." style="width:170px" />
+        <el-select v-model="fSup" placeholder="全部供应商" clearable filterable style="width:160px">
+          <el-option v-for="s in suppliers" :key="s.id" :label="s.name" :value="s.id" />
+        </el-select>
+        <button v-if="canReport" class="btn pri sm" @click="openReport">+ 上报异常</button>
+      </div>
+      <div class="qms-card__body sticky-wrap">
         <table class="tbl" style="min-width: 1180px">
           <thead>
             <tr>
               <th>异常单号</th><th>批次号</th><th>供应商</th><th>物料</th>              <th>异常描述</th>
-              <th>数量</th><th>等级</th><th>触发意见</th><th>日期</th><th>处理人</th><th>状态</th><th>操作</th>
+              <th>数量</th><th>等级</th><th>触发意见</th><th>日期</th><th>处理人</th><th>状态</th>
+              <th class="col-fixed">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -422,7 +669,7 @@ function toast(msg: string) {
                 <span v-if="a.noticeDate" class="meta">通知:{{ a.noticeDate }}</span>
                 <span v-if="a.measuresDate" class="meta">措施:{{ a.measuresDate }}</span>
               </td>
-              <td>
+              <td class="col-fixed">
                 <button class="btn sm" @click="openHandle(a.id)">{{ { '待处理': '处理', '整改中': '处理', '待验证': '验证', '三批验证': '批次', '已关闭': '详情' }[a.status] }}</button>
                 <button v-if="canCapaRow(a)" class="btn sm ghost" @click="openCapa(a.id)">触发CAPA</button>
               </td>
@@ -437,14 +684,23 @@ function toast(msg: string) {
 
     <!-- 2. 8D整改进度概览 -->
     <div class="qms-card">
-      <div class="qms-card__header"><h3>8D整改进度概览 <span class="sr-tag" title="SR-PTL-010,014,015,016,017,018">SR-PTL-010,014,015,016,017,018</span></h3></div>
-      <div class="qms-card__body">
+      <div class="qms-card__header" style="cursor:pointer" @click="d8Expanded = !d8Expanded">
+        <h3>{{ d8Expanded ? '▼' : '▶' }} 8D整改进度概览 </h3>
+      </div>
+      <div v-if="d8Expanded" class="qms-card__body">
         <div v-if="d8List.length === 0" class="note">当前无进行中的8D整改</div>
         <div v-for="[d8Id, d8] in d8List" :key="d8Id" class="d8-block">
           <div class="d8-head">
-            <strong>{{ d8Id }}</strong>
+            <strong>{{ d8.d8No || d8Id }}</strong>
             <span>当前阶段：<span class="qms-pill p">D{{ d8.stage.replace('D', '') }}</span></span>
-            <span v-if="d8.capaTriggered" class="qms-pill y">已触发CAPA</span>
+            <span v-if="d8.status === '已闭环'" class="qms-pill g">已闭环</span>
+            <span v-else-if="d8.capaTriggered" class="qms-pill y">已触发CAPA</span>
+            <button
+              class="btn sm pri"
+              style="margin-left:auto"
+              :disabled="d8.status === '已闭环'"
+              @click="advance8d(d8.id, d8.stage)"
+            >推进阶段 → {{ nextStage(d8.stage) }}</button>
           </div>
           <div class="stepper">
             <template v-for="(st, i) in d8.stages" :key="st.d">
@@ -461,10 +717,15 @@ function toast(msg: string) {
 
     <!-- 3. 供应商升级管理 -->
     <div class="qms-card">
-      <div class="qms-card__header"><h3>供应商升级管理 <span class="sr-tag" title="SR-CAR-020,022,SR-SBM-015">SR-CAR-020,022,SR-SBM-015</span></h3></div>
-      <div class="qms-card__body" style="padding: 0; overflow-x: auto">
+      <div class="qms-card__header">
+        <h3>供应商升级管理</h3>
+        <div class="grow"></div>
+        <span class="meta">定时扫描：每天凌晨 3:00 · ≥2次自动升级 · ≥3次自动降份额</span>
+        <button class="btn pri sm" @click="triggerEscalation" style="margin-left:10px">手动触发升级扫描</button>
+      </div>
+      <div class="qms-card__body sticky-wrap">
         <table class="tbl">
-          <thead><tr><th>供应商</th><th>当前等级</th><th>质量问题次数(近6月)</th><th>建议措施</th><th>升级状态</th><th>操作</th></tr></thead>
+          <thead><tr><th>供应商</th><th>当前等级</th><th>质量问题次数(近6月)</th><th>建议措施</th><th>升级状态</th><th class="col-fixed">操作</th></tr></thead>
           <tbody>
             <tr v-for="r in upgradeRows" :key="r.sup">
               <td>{{ r.sup }}</td>
@@ -472,62 +733,65 @@ function toast(msg: string) {
               <td>{{ r.cnt }}</td>
               <td>{{ r.plan }}</td>
               <td><span class="qms-pill" :class="r.statusCls">{{ r.status }}</span></td>
-              <td><button class="btn sm" @click="toast('已发送整改通知')">发送通知</button></td>
+              <td class="col-fixed"><button class="btn sm" @click="toast('已发送整改通知')">发送通知</button></td>
             </tr>
           </tbody>
         </table>
       </div>
     </div>
 
-    <!-- 上报异常弹窗 -->
-    <el-dialog v-model="reportVisible" title="上报来料异常" width="520px">
-      <div class="form-row">
-        <label>批次号</label>
-        <input v-model="reportForm.lotId" type="text" class="qms-input" placeholder="输入来料批次号" />
-        <label>供应商</label>
-        <select v-model="reportForm.supId" class="qms-select">
-          <option value="">选择供应商</option>
-          <option v-for="s in suppliers" :key="s.id" :value="s.id">{{ s.name }}</option>
-        </select>
-        <label>物料料号</label>
-        <input v-model="reportForm.partNo" type="text" class="qms-input" placeholder="输入物料料号" />
-        <label>异常描述</label>
-        <textarea v-model="reportForm.desc" rows="3" class="qms-input" placeholder="详细描述异常现象..." />
-        <label>异常数量</label>
-        <input v-model.number="reportForm.qty" type="number" class="qms-input" />
-        <label>严重等级</label>
-        <select v-model="reportForm.level" class="qms-select"><option>严重</option><option>一般</option></select>
-        <label>整改触发意见</label>
-        <select v-model="reportForm.triggerRule" class="qms-select">
-          <option>一键即触发</option><option>累计≥3件</option>
-        </select>
-        <div class="note" style="margin-top:4px">⚠ 触发意见将记录在异常单中，用于区分「严重1件即触发 / 人工一键发起」与「同物料一般不良滚动30天累计≥3件自动触发」（SR-CAR-001 / SR-CAR-002）。</div>
+    <!-- 上报异常弹窗（section化） -->
+    <el-dialog v-model="reportVisible" title="上报来料异常" width="540px">
+      <div class="report-sections">
+        <div class="report-sec">
+          <div class="report-sec__title">基础信息</div>
+          <label>批次号</label>
+          <input v-model="reportForm.lotId" type="text" class="qms-input" placeholder="输入来料批次号" />
+          <label>供应商</label>
+          <select v-model="reportForm.supId" class="qms-select">
+            <option value="">选择供应商</option>
+            <option v-for="s in suppliers" :key="s.id" :value="s.id">{{ s.name }}</option>
+          </select>
+          <label>物料料号</label>
+          <input v-model="reportForm.partNo" type="text" class="qms-input" placeholder="输入物料料号" />
+        </div>
+        <div class="report-sec">
+          <div class="report-sec__title">异常详情</div>
+          <label>异常描述</label>
+          <textarea v-model="reportForm.desc" rows="3" class="qms-input" placeholder="详细描述异常现象..." />
+          <label>异常数量</label>
+          <input v-model.number="reportForm.qty" type="number" class="qms-input" />
+          <label>严重等级</label>
+          <select v-model="reportForm.level" class="qms-select"><option>严重</option><option>一般</option></select>
+          <label>整改触发意见</label>
+          <select v-model="reportForm.triggerRule" class="qms-select">
+            <option>一键即触发</option><option>累计≥3件</option>
+          </select>
+          <div class="note">📌 提交后需手动选择整改方式（8D / CAPA）。</div>
+        </div>
       </div>
-      <div class="note" style="margin-top:8px">📌 异常上报后，需<strong>手动选择</strong>整改方式（8D 或 CAPA）。</div>
       <template #footer>
         <button class="btn pri" @click="submitReport">提交</button>
         <button class="btn ghost" @click="reportVisible = false">取消</button>
       </template>
     </el-dialog>
 
-    <!-- 异常处理弹窗（按状态分支，含整改记录与闭环） -->
-    <el-dialog v-model="handleVisible" :title="(current?.archived ? '【已归档】' : '') + '异常处理 · ' + (current?.id || '')" width="640px">
+    <!-- 异常处理弹窗（按状态分支，紧凑布局） -->
+    <el-dialog v-model="handleVisible" :title="(current?.archived ? '【已归档】' : '') + '异常处理 · ' + (current?.id || '')" width="660px">
       <template v-if="current">
-        <div class="kv">
-          <div class="k">异常单号</div><div>{{ current.id }}</div>
-          <div class="k">批次号</div><div>{{ current.lotId }}</div>
-          <div class="k">供应商</div><div>{{ current.supName }}</div>
-          <div class="k">物料</div><div>{{ current.partName }} ({{ current.partNo }})</div>
-          <div class="k">异常描述</div><div>{{ current.desc }}</div>
-          <div class="k">异常数量</div><div>{{ current.qty }}</div>
-          <div class="k">等级</div><div><span class="qms-pill" :class="levelPill(current.level)">{{ current.level }}</span></div>
-          <div class="k">整改触发意见</div><div>
-            <span class="qms-pill" :class="triggerRulePill(current.triggerRule)">{{ current.triggerRule || '—' }}</span>
-            <span class="meta" style="margin-left:6px">{{ triggerRuleHint(current.triggerRule) }}</span>
+        <!-- 信息卡（紧凑 2 列） -->
+        <div class="handle-info">
+          <div class="hi-row"><span class="hi-k">单号</span>{{ current.id }}</div>
+          <div class="hi-row"><span class="hi-k">批次</span>{{ current.lotId }}</div>
+          <div class="hi-row"><span class="hi-k">供应商</span>{{ current.supName }}</div>
+          <div class="hi-row"><span class="hi-k">物料</span>{{ current.partName || current.partNo }}</div>
+          <div class="hi-row"><span class="hi-k">数量</span>{{ current.qty }}</div>
+          <div class="hi-row"><span class="hi-k">等级</span><span class="qms-pill" :class="levelPill(current.level)">{{ current.level }}</span></div>
+          <div class="hi-row"><span class="hi-k">8D</span>
+            <template v-if="current.d8Id"><a class="hi-link" @click="go8D()">{{ current.d8Id.slice(-12) }} →</a></template>
+            <span v-else class="muted">未启动</span>
           </div>
-          <div class="k">处理人</div><div>{{ current.handler }}</div>
-          <div class="k">关联8D</div><div>{{ current.d8Id || '未启动' }}</div>
-          <div class="k">计划完成</div><div>{{ current.extensionApproved && current.extensionDate ? current.extensionDate + '（延期获批）' : current.planDate || '—' }}</div>
+          <div class="hi-row"><span class="hi-k">计划完成</span>{{ current.extensionApproved && current.extensionDate ? current.extensionDate + '(延)' : current.planDate || '—' }}</div>
         </div>
 
         <!-- 超期提示（SR-CAR-010/011） -->
@@ -541,32 +805,28 @@ function toast(msg: string) {
           </div>
         </div>
 
-        <!-- 待处理 -->
+        <!-- 待处理：处置 + 整改方式 -->
         <template v-if="current.status === '待处理'">
-          <hr style="margin:12px 0;border:0;border-top:1px solid #e5e7eb" />
-          <div class="form-row">
-            <label>处置措施</label>
-            <select v-model="disposal" class="qms-select">
-              <option>退货</option><option>特采</option><option>挑选使用</option><option>报废</option>
-            </select>
-            <label>备注</label>
-            <textarea v-model="remark" rows="2" class="qms-input" placeholder="备注..." />
+          <div class="action-panel">
+            <div class="ap-title">处置措施</div>
+            <div class="ap-row">
+              <select v-model="disposal" class="qms-select"><option>退货</option><option>特采</option><option>挑选使用</option><option>报废</option></select>
+              <textarea v-model="remark" rows="2" class="qms-input" placeholder="备注..." />
+            </div>
+            <div class="ap-title" style="margin-top:14px">整改方式（手动触发）</div>
+            <div class="ap-btns">
+              <button class="btn" :class="current.d8Id ? '' : 'pri'" @click="start8D">{{ current.d8Id ? '✓ 8D已启动' : '发起8D' }}</button>
+              <button class="btn pri" @click="startCapa">发起CAPA</button>
+              <button class="btn" style="background:#1e4d8b;color:#fff" @click="triggerAudit">发起现场审核</button>
+            </div>
+            <button class="btn pri" style="width:100%;margin-top:12px" @click="openNotice">推送整改通知</button>
           </div>
-          <hr style="margin:12px 0;border:0;border-top:1px solid #e5e7eb" />
-          <div style="font-weight:600;margin-bottom:6px">整改方式（手动触发）</div>
-          <div style="display:flex;gap:8px;margin-bottom:8px">
-            <button class="btn" :class="current.d8Id ? '' : 'pri'" @click="start8D">{{ current.d8Id ? '✓ 8D已启动' : '发起8D' }}</button>
-            <button class="btn" @click="startCapa">发起CAPA</button>
-          </div>
-          <hr style="margin:12px 0;border:0;border-top:1px solid #e5e7eb" />
-          <button class="btn pri" style="width:100%" @click="openNotice">推送整改通知</button>
         </template>
 
-        <!-- 整改中：措施执行时间线（SR-CAR-007） -->
+        <!-- 整改中 -->
         <template v-else-if="current.status === '整改中'">
-          <hr style="margin:12px 0;border:0;border-top:1px solid #e5e7eb" />
-          <div class="kv-box">
-            <div style="font-weight:600;margin-bottom:6px">已发送的整改通知</div>
+          <div class="action-panel">
+            <div class="ap-title">已发送的整改通知</div>
             <div class="kv">
               <div class="k">通知日期</div><div>{{ current.noticeDate || '—' }}</div>
               <div class="k">要求完成</div><div>{{ current.planDate || '—' }}</div>
@@ -591,60 +851,45 @@ function toast(msg: string) {
           <button class="btn pri" style="width:100%;margin-top:12px" @click="openMeasures">更新措施进展（提交执行记录）</button>
         </template>
 
-        <!-- 待验证：SQE验证（SR-CAR-008） -->
+        <!-- 待验证：措施时间线 + SQE 验证按钮 -->
         <template v-else-if="current.status === '待验证'">
-          <hr style="margin:12px 0;border:0;border-top:1px solid #e5e7eb" />
-          <div class="kv-box ok">
-            <div style="font-weight:600;margin-bottom:6px">措施执行时间线</div>
-            <div v-for="(m, i) in current.measureLogs" :key="i" class="rectify-timeline" style="margin-bottom:8px">
-              <div class="timeline-item done">
+          <div class="action-panel">
+            <div class="ap-title">措施执行时间线</div>
+            <div v-if="current.measureLogs.length" class="rectify-timeline">
+              <div v-for="(m, i) in current.measureLogs" :key="i" class="timeline-item done">
                 <div class="timeline-date">{{ m.completeDate }} · {{ m.operator }}</div>
                 <div class="timeline-content">
-                  <div class="timeline-title">措施更新 #{{ i + 1 }}</div>
+                  <div class="timeline-title">措施 #{{ i + 1 }}</div>
                   <div class="timeline-desc">{{ m.content }}</div>
-                  <div v-if="m.evidence.length" class="evi">
-                    <span v-for="(ev, j) in m.evidence" :key="j" class="evi-tag">📎 {{ ev.name }}（{{ fmtSize(ev.size) }}）</span>
-                  </div>
                 </div>
               </div>
             </div>
+            <div v-else class="note">暂无措施记录</div>
+            <button class="btn pri" style="width:100%;margin-top:12px" @click="openVerify" :disabled="!isSqe">SQE 验证（通过→三批验证 / 不通过→退回）</button>
+            <div v-if="!isSqe" class="note" style="margin-top:4px">当前角色无 SQE 验证权限</div>
           </div>
-          <button class="btn pri" style="width:100%;margin-top:12px" @click="openVerify" :disabled="!isSqe">SQE验证（通过→三批验证 / 不通过→退回）</button>
-          <div v-if="!isSqe" class="note" style="margin-top:6px">当前角色无 SQE 验证权限</div>
         </template>
 
-        <!-- 三批验证（SR-CAR-009） -->
+        <!-- 三批验证：批次进度 + 操作按钮 -->
         <template v-else-if="current.status === '三批验证'">
-          <hr style="margin:12px 0;border:0;border-top:1px solid #e5e7eb" />
-          <div style="font-weight:600;margin-bottom:6px">连续 3 批合格验证（SR-CAR-009）</div>
-          <div class="batch-progress">
-            <div v-for="n in 3" :key="n" class="bp-item" :class="(current.batchTrack[n-1]?.result) || 'empty'">
-              {{ n }}
-              <span v-if="current.batchTrack[n-1]">{{ current.batchTrack[n-1].result }}</span>
+          <div class="action-panel">
+            <div class="ap-title">连续 3 批合格验证</div>
+            <div class="batch-progress">
+              <div v-for="n in 3" :key="n" class="bp-item" :class="(current.batchTrack[n-1]?.result) || 'empty'">{{ n }}<span v-if="current.batchTrack[n-1]">{{ current.batchTrack[n-1].result }}</span></div>
             </div>
-          </div>
-          <div v-if="current.batchTrack.length" class="rectify-timeline" style="margin:10px 0">
-            <div v-for="(b, i) in current.batchTrack" :key="i" class="timeline-item" :class="b.result === '合格' ? 'done' : 'fail'">
-              <div class="timeline-date">{{ b.date }}</div>
-              <div class="timeline-content">
-                <div class="timeline-title">批次 {{ b.batchNo }} · {{ b.result }}</div>
-                <div class="timeline-desc">检验结果已自动关联整改单</div>
-              </div>
+            <div class="ap-btns" style="margin-top:10px">
+              <button class="btn pri" style="flex:1" @click="passBatch">登记合格</button>
+              <button class="btn r" style="flex:1" @click="failBatch">登记不合格</button>
             </div>
+            <div class="note" style="margin-top:8px">3 批合格 → 自动闭环；不合格 → 清零重新评估。</div>
           </div>
-          <div style="display:flex;gap:8px">
-            <button class="btn pri" style="flex:1" @click="passBatch">登记一批合格</button>
-            <button class="btn r" style="flex:1" @click="failBatch">登记一批不合格</button>
-          </div>
-          <div class="note" style="margin-top:6px">3 批全部合格将自动闭环；任一不合格则计数器清零并通知 SQE 重新评估。</div>
-
         </template>
 
-        <!-- 已关闭：只读归档 + 完整时间线 + 历史关联（SR-CAR-012） -->
+        <!-- 已关闭：归档展示 + 完整时间线 -->
         <template v-else-if="current.status === '已关闭'">
-          <hr style="margin:12px 0;border:0;border-top:1px solid #e5e7eb" />
-          <div class="archived-flag">🔒 已归档（只读） · 闭环人：{{ current.closeAuditor }} · 闭环时间：{{ current.closeDate }}</div>
-          <div style="font-weight:600;margin:12px 0 6px">整改完整时间线</div>
+          <div class="action-panel">
+            <div class="archived-flag">🔒 已归档（只读） · {{ current.closeAuditor }} · {{ current.closeDate }}</div>
+          <div style="font-weight:600;margin-top:12px;margin-bottom:4px">整改完整时间线</div>
           <div class="rectify-timeline">
             <div v-if="current.noticeDate" class="timeline-item done">
               <div class="timeline-date">{{ current.noticeDate }}</div>
@@ -684,6 +929,7 @@ function toast(msg: string) {
               <span>{{ h.id }}</span><span class="meta">{{ h.partName }} · {{ h.closeDate }}</span>
             </div>
           </div>
+          </div><!-- /action-panel 已关闭 -->
         </template>
       </template>
       <template #footer>
@@ -766,27 +1012,43 @@ function toast(msg: string) {
       </template>
     </el-dialog>
 
-    <!-- 触发CAPA弹窗 -->
-    <el-dialog v-model="capaVisible" title="触发CAPA" width="560px">
-      <div class="form-row">
-        <p><strong>关联8D：</strong>{{ capaId }}</p>
-        <label>CAPA类型</label>
-        <select v-model="capaForm.type" class="qms-select">
-          <option>纠正措施</option><option>预防措施</option><option>系统改进</option>
-        </select>
-        <label>问题描述</label>
-        <textarea v-model="capaForm.problem" rows="3" class="qms-input" placeholder="描述需要CAPA解决的核心问题..." />
-        <label>根本原因分析</label>
-        <textarea v-model="capaForm.rootcause" rows="3" class="qms-input" placeholder="输入根本原因..." />
-        <label>行动计划</label>
-        <textarea v-model="capaForm.plan" rows="3" class="qms-input" placeholder="输入具体行动计划..." />
-        <label>责任人</label>
-        <input v-model="capaForm.owner" type="text" class="qms-input" placeholder="输入责任人" />
-        <label>目标完成日期</label>
-        <input v-model="capaForm.deadline" type="date" class="qms-input" />
-      </div>
+    <!-- 触发CAPA弹窗 / CAPA闭环 -->
+    <el-dialog v-model="capaVisible" :title="capaMode === 'view' ? 'CAPA 详情 · 闭环' : '触发CAPA'" width="560px">
+      <template v-if="capaMode === 'view' && currentCapa">
+        <div class="kv-box">
+          <div class="kv"><span class="k">CAPA编号</span><span>{{ currentCapa.title || currentCapa.id }}</span></div>
+          <div class="kv"><span class="k">状态</span><span><span class="qms-pill" :class="capaStatusPill(currentCapa.status)">{{ currentCapa.status }}</span></span></div>
+          <div class="kv"><span class="k">类型</span><span>{{ currentCapa.type }}</span></div>
+          <div class="kv"><span class="k">关联8D</span><span>{{ currentCapa.d8Id || '—' }}</span></div>
+          <div class="kv"><span class="k">责任人</span><span>{{ currentCapa.owner }}</span></div>
+          <div class="kv"><span class="k">目标日期</span><span>{{ currentCapa.dueDate }}</span></div>
+          <div class="kv"><span class="k">问题描述</span><span>{{ currentCapa.problem }}</span></div>
+          <div class="kv"><span class="k">根本原因</span><span>{{ currentCapa.rootcause || '—' }}</span></div>
+        </div>
+        <div class="note">关闭 CAPA 将级联闭环其关联的 8D 与来料异常单。</div>
+      </template>
+      <template v-else>
+        <div class="form-row">
+          <p><strong>关联8D：</strong>{{ capaId || '（直接关联异常单）' }}</p>
+          <label>CAPA类型</label>
+          <select v-model="capaForm.type" class="qms-select">
+            <option>纠正措施</option><option>预防措施</option><option>系统改进</option>
+          </select>
+          <label>问题描述</label>
+          <textarea v-model="capaForm.problem" rows="3" class="qms-input" placeholder="描述需要CAPA解决的核心问题..." />
+          <label>根本原因分析</label>
+          <textarea v-model="capaForm.rootcause" rows="3" class="qms-input" placeholder="输入根本原因..." />
+          <label>行动计划</label>
+          <textarea v-model="capaForm.plan" rows="3" class="qms-input" placeholder="输入具体行动计划..." />
+          <label>责任人</label>
+          <input v-model="capaForm.owner" type="text" class="qms-input" placeholder="输入责任人" />
+          <label>目标完成日期</label>
+          <input v-model="capaForm.deadline" type="date" class="qms-input" />
+        </div>
+      </template>
       <template #footer>
-        <button class="btn pri" @click="submitCapa">确认触发</button>
+        <button v-if="capaMode === 'view' && currentCapa" class="btn pri" @click="submitCapa">确认闭环</button>
+        <button v-else class="btn pri" @click="submitCapa">确认触发</button>
         <button class="btn ghost" @click="capaVisible = false">取消</button>
       </template>
     </el-dialog>
@@ -795,6 +1057,42 @@ function toast(msg: string) {
 
 <style scoped lang="scss">
 .sqm-abn { display: flex; flex-direction: column; gap: 14px; }
+
+/* 原生 table "操作"列右固定（与 el-table fixed="right" 等效） */
+.sticky-wrap { overflow-x: auto; padding: 0; }
+.sticky-wrap .tbl th.col-fixed,
+.sticky-wrap .tbl td.col-fixed {
+  position: sticky; right: 0; z-index: 1;
+  background: #fff; box-shadow: -2px 0 4px rgba(0,0,0,.06);
+  min-width: 90px;
+}
+.sticky-wrap .tbl thead th.col-fixed { background: #f4f8ff; }
+
+.grow { flex: 1; }
+
+/* KPI 概览卡片 */
+.kpi-row {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.kpi-card {
+  flex: 1;
+  min-width: 100px;
+  background: #f4f8ff;
+  border: 1px solid #dbe7f7;
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  &.warn { background: #fff8e1; border-color: #f0c14b; .kpi-num { color: #b58a00; } }
+  &.danger { background: #fdecea; border-color: #f5c6c0; .kpi-num { color: #c0392b; } }
+  &.alert { background: #fdeaea; border-color: #f9b8b8; .kpi-num { color: #d63031; } }
+  &.done { background: #e8f5e9; border-color: #b7e0bb; .kpi-num { color: #2f7d32; } }
+  .kpi-num { font-size: 24px; font-weight: 700; color: #1e4d8b; line-height: 1.1; }
+  .kpi-label { font-size: 11px; color: #6b7785; }
+}
 
 .qms-select, .qms-input {
   height: 32px;
@@ -868,5 +1166,46 @@ textarea.qms-input { height: auto; padding: 8px 10px; resize: vertical; }
   &.r { background: #c0392b; border-color: #c0392b; color: #fff; }
   &:disabled { opacity: 0.5; cursor: not-allowed; }
   &:not(:disabled):hover { filter: brightness(0.96); }
+}
+
+/* ======== 弹窗优化：信息卡 + 操作面板 ======== */
+.handle-info {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 12px;
+  background: #f4f8ff;
+  border: 1px solid #dbe7f7;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  font-size: 12px;
+}
+.hi-row { display: flex; gap: 6px; align-items: baseline; overflow: hidden; }
+.hi-k { color: #6b7785; font-weight: 500; min-width: 56px; flex-shrink: 0; }
+.hi-link { color: #1e4d8b; cursor: pointer; text-decoration: underline; font-size: 11px; }
+
+.action-panel {
+  background: #fafbfc;
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-top: 10px;
+  &:first-child { margin-top: 0; }
+}
+.ap-title { font-weight: 600; font-size: 12px; color: #1e4d8b; margin-bottom: 8px; }
+.ap-row { display: flex; flex-direction: column; gap: 6px; }
+.ap-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ======== 上报弹窗：section 表单 ======== */
+.report-sections { display: flex; flex-direction: column; gap: 14px; }
+.report-sec {
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  &__title { font-weight: 600; font-size: 12.5px; color: #1e4d8b; margin-bottom: 4px; }
+  label { font-size: 12px; color: #6b7785; }
 }
 </style>

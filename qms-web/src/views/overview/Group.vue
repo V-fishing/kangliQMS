@@ -4,6 +4,8 @@ import { useCompanyStore } from '@/stores/company'
 import { COMPANIES, COMPANY_KPI, KPI_METRICS, buildCompareRows } from '@/mock/company'
 import type { CompanyId } from '@/types/company'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
+useChartResize(() => [trendInst, ...pieInsts])
 
 const companyStore = useCompanyStore()
 const isGroupAdmin = computed(() => companyStore.isGroupAdmin)

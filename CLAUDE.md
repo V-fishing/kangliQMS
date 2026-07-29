@@ -9,8 +9,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## ⚠️ Repository state — read before editing
 
 - **The Vue project lives in `qms-web/`.** Run every command from there (`cd qms-web`). All paths below are relative to `qms-web/` unless noted. `package.json`, `vite.config.ts`, `src/` for the *real* project are inside `qms-web/`, not at the repo root.
-- **There is a stale, diverged duplicate at the repo root** (`QMS-fronted/src/`, `QMS-fronted/package.json`, `QMS-fronted/vite.config.ts`, …). It is **staged but NOT committed** (HEAD `d807cce` contains only `qms-web/`), and it is incomplete — it is missing the asm/msm/tlm/qsm modules, the `company` store, `CompanySelect`, `ErrorBoundary`, etc. **Do not edit the root-level `src/`.** Treat `qms-web/` as the sole source of truth. (Cleaning up this duplicate + its staged index entries is an open task.)
-- **`.gitignore` currently contains unresolved merge-conflict markers** (`<<<<<<< HEAD` / `=======` / `>>>>>>>`). It needs to be resolved before committing.
 
 ## Package manager
 
@@ -41,9 +39,9 @@ Run a **single E2E spec**: `pnpm exec playwright test tests/e2e/fia-entry.spec.t
 ### App bootstrap order is load-bearing (`src/main.ts`)
 
 The sequence in `main.ts` is intentional and must be preserved:
-1. `app.use(createPinia())` — Pinia must be active before step 2.
-2. `buildDynamicRoutes(router)` — registers dynamic routes **before** `app.use(router)`. If router is installed first, its initial navigation resolves before routes are added and refreshes land on 404.
-3. `app.use(router)` → `app.use(ElementPlus, { locale: zhCn, size: 'large' })` → `setupDirectives` → `setupI18n` → `useDictStore().preload()` → `app.mount`.
+1. `app.use(createPinia())` — Pinia must be active before routing.
+2. `app.use(router)` → `app.use(ElementPlus, { locale: zhCn, size: 'large' })` → `setupDirectives` → `setupI18n` → `authStore.restore()` → `useDictStore().preload()` → `app.mount`.
+3. `buildDynamicRoutes(router)` is called from `router/guard.ts` `beforeEach` and `auth.login()` (not `main.ts`), registering dynamic routes before the first guarded navigation completes.
 
 ### Dynamic routing driven by a mock menu tree
 
@@ -64,11 +62,11 @@ Stores involved: `auth` (token/role/account/delegation/dataScope), `company` (mu
 
 After login, `auth.loginWithAccount(acc)` calls `companyStore.initFromAccount(acc)`, which seeds the account's linkable companies + per-company permission matrix but leaves `currentCompanyId` empty (forcing the `/company-select` step). Context is either a concrete `CompanyId` or `'GROUP'` (集团总览, group-wide read-only aggregate). Switching company/group via the top bar is **免重登** (no re-login): `switchCompany(id)` / `switchToGroup()`. Modules should read data scoped by the current company context.
 
-### API layer = mock-swap pattern
+### API layer — connected to real backend
 
-`src/api/modules/*.ts` export service objects (e.g. `fiaApi`) whose methods **currently return mock data directly** (`getKpi: async () => fiaKpi`). When the backend is ready, replace each mock return with a `request.get/post/put/delete` call — the function signatures stay the same so views don't change. `src/api/index.ts` barrel-exports all module APIs.
+`src/api/modules/*.ts` export service objects (e.g. `fiaApi`) whose methods call the real backend via `request.get/post/put/delete` — the function signatures are stable so views don't depend on backend DTO shapes. Each module uses adapter functions (e.g. `mapTask`, `mapKpi`) to transform backend DTOs into the app's own view-model types. Where the backend has no matching endpoint, methods return empty structures (never mock business data). `src/api/index.ts` barrel-exports all module APIs.
 
-`src/utils/request.ts` is the axios wrapper for that swap: `baseURL = import.meta.env.VITE_API_BASE` (`/api`), request interceptor injects `Bearer` JWT from `localStorage['qms_token']` + an `X-Trace-Id`, response interceptor unwraps `res.data`, treats non-zero/non-200 `res.code` as a business error (toast + reject), and redirects to `/login` on 401. **ESLint ignores `src/api/**`** so the mock-swap scaffolding doesn't trip the strict TS rules.
+`src/utils/request.ts` is the axios wrapper: `baseURL = import.meta.env.VITE_API_BASE` (`/api`), request interceptor injects `Bearer` JWT from `localStorage['qms_token']` + an `X-Trace-Id`, response interceptor unwraps `res.data`, treats non-zero/non-200 `res.code` as a business error (toast + reject), and redirects to `/login` on 401. **ESLint ignores `src/api/**`** so the adapter scaffolding doesn't trip the strict TS rules.
 
 Env vars (`.env.development` / `.env.production`): `VITE_API_BASE` (`/api`), `VITE_OSS_BASE`, `VITE_SSE_BASE`, `VITE_APP_TITLE`.
 

@@ -2,7 +2,7 @@
 import { ref, reactive, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { BANNERS } from '@/config/banners'
 import { asmWorkorders } from '@/mock/asm'
 import type { AsmWorkorder } from '@/types/asm'
 
@@ -127,8 +127,6 @@ function autoCloseOverdue() {
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>售后工单列表</h3>
-        <span class="sr-tag">SR-ASM-001</span><span class="sr-tag">SR-ASM-005</span>
-        <span class="sr-tag">SR-ASM-008</span><span class="sr-tag">SR-ASM-011</span>
         <div style="margin-left:auto; display:flex; gap:8px; align-items:center">
           <el-select v-model="filterStatus" size="small" style="width:110px">
             <el-option v-for="s in statusOptions" :key="s" :label="s" :value="s" />

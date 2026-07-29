@@ -25,25 +25,53 @@ service.interceptors.request.use(
   (error) => Promise.reject(error),
 )
 
+// 防止并发 401 触发多次跳转登录的标志位
+let isRedirectingToLogin = false
+
 // 响应拦截：业务码统一处理 + 401 跳登录 + 错误 toast
 service.interceptors.response.use(
   (response: AxiosResponse) => {
     const res = response.data
     if (res.code !== undefined && res.code !== 0 && res.code !== 200) {
-      ElMessage.error(res.message || '请求失败')
-      return Promise.reject(new Error(res.message || 'Error'))
+      // 业务 401:清 token 跳登录(与 HTTP 401 处理一致)
+      if (res.code === 401) {
+        localStorage.removeItem('qms_token')
+        const onLoginPage = window.location.pathname.startsWith('/login')
+        if (!onLoginPage && !isRedirectingToLogin) {
+          isRedirectingToLogin = true
+          ElMessage.error('登录已过期，请重新登录')
+          window.location.href = '/login'
+        }
+      } else {
+        ElMessage.error(res.msg || '请求失败')
+      }
+      return Promise.reject(Object.assign(new Error(res.msg || 'Error'), { response: { status: res.code, data: res } }))
     }
     return res.data ?? res
   },
   (error) => {
     const status = error.response?.status
     if (status === 401) {
+      // 会话过期/未认证：清理 token 并跳登录。
+      // 仅在非登录页时跳转，避免登录页自身 401 造成的重复跳转/刷屏；
+      // 用标志位防止并发请求同时触发多次跳转。
       localStorage.removeItem('qms_token')
-      window.location.href = '/login'
+      const onLoginPage = window.location.pathname.startsWith('/login')
+      if (!onLoginPage && !isRedirectingToLogin) {
+        isRedirectingToLogin = true
+        ElMessage.error('登录已过期，请重新登录')
+        const redirect = encodeURIComponent(window.location.pathname + window.location.search)
+        window.location.href = `/login?redirect=${redirect}`
+      }
       return Promise.reject(error)
     }
-    const msg = error.response?.data?.message || error.message || '网络异常'
-    ElMessage.error(msg)
+    const msg = error.response?.data?.msg || error.message || '网络异常'
+    // 404 等后端未就绪错误,只输出控制台,不弹红色 toast 干扰用户(由各业务页面自行处理回退)
+    if (status === 404 || status === 502 || status === 503) {
+      console.warn(`[request] ${status} ${msg} (${error.config?.url})`)
+    } else {
+      ElMessage.error(msg)
+    }
     return Promise.reject(error)
   },
 )

@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
-import { spcAlarms } from '@/mock/spc'
-import type { SpcAlarm } from '@/types/spc'
+import { BANNERS } from '@/config/banners'
+import { spcApi } from '@/api'
+import type { SpcAlarm, SpcNotifyChannel, SpcNotifyRecord } from '@/types/spc'
 
 const authStore = useAuthStore()
 const banner = BANNERS.spc?.[authStore.role] || {
@@ -14,8 +14,21 @@ const banner = BANNERS.spc?.[authStore.role] || {
 
 
 
-// ====== 数据（对齐 HTML MOCKX.spc.alarmAll） ======
-const list = ref<SpcAlarm[]>(spcAlarms.map((a) => ({ ...a })))
+// ====== 数据（后端 /spc/alarms） ======
+const list = ref<SpcAlarm[]>([])
+// 判异规则编号 -> 规则名（用于"触发规则"列显示 编号+名称，反查 ops.spc_rule 主数据表）
+const ruleMap = ref<Record<string, string>>({})
+onMounted(async () => {
+  list.value = await spcApi.getAlarms()
+  channels.value = await spcApi.getNotifyChannels()
+  try {
+    const rs = await spcApi.getRules()
+    ruleMap.value = Object.fromEntries(rs.map((r) => [r.code, r.name]))
+  } catch {
+    ruleMap.value = {}
+  }
+  await loadRecords()
+})
 const pendingCount = computed(() => list.value.filter((x) => x.st === '待确认').length)
 
 // ====== 筛选（级别 / 状态 / 关键词） ======
@@ -40,29 +53,59 @@ function openClose(row: SpcAlarm) {
   closeForm.value = { reason: '', measure: '' }
   closeShow.value = true
 }
-function doClose() {
+const closing = ref(false)
+async function doClose() {
   if (!closeForm.value.reason.trim() || !closeForm.value.measure.trim()) {
     ElMessage.warning('关闭原因与处置措施均为必填')
     return
   }
-  if (closeTarget.value) {
+  if (!closeTarget.value) return
+  closing.value = true
+  try {
+    await spcApi.closeAlarm(closeTarget.value.id, closeForm.value.reason, closeForm.value.measure)
     closeTarget.value.st = '已关闭'
     closeTarget.value.reason = `${closeForm.value.reason}｜处置：${closeForm.value.measure}`
+    closeShow.value = false
+    ElMessage.success('告警已确认关闭')
+    list.value = await spcApi.getAlarms()
+  } catch (e: any) {
+    ElMessage.error(e?.msg || e?.message || '关闭失败')
+  } finally {
+    closing.value = false
   }
-  closeShow.value = false
-  ElMessage.success('告警已确认关闭')
 }
 function suppress() {
   ElMessage.info('已设置 30 分钟抑制（演示）')
 }
 
-// ====== 通知渠道（对应 HTML ②通知渠道） ======
-const channels = ref([
-  { name: '系统弹窗', on: true },
-  { name: '企业微信', on: true },
-  { name: '邮件', on: false },
-  { name: '短信', on: false },
-])
+// ====== 通知渠道（后端 /spc/notify-channels，配置落库） ======
+const channels = ref<SpcNotifyChannel[]>([])
+// ====== 推送记录（报警触发后按启用渠道生成，留痕） ======
+const records = ref<SpcNotifyRecord[]>([])
+const recordsLoading = ref(false)
+async function loadRecords() {
+  recordsLoading.value = true
+  try {
+    records.value = await spcApi.getNotifyRecords()
+  } catch {
+    records.value = []
+  } finally {
+    recordsLoading.value = false
+  }
+}
+const savingChannel = ref(false)
+async function saveChannel(c: SpcNotifyChannel) {
+  savingChannel.value = true
+  try {
+    await spcApi.setNotifyChannel(c.id, c.isEnabled)
+    ElMessage.success(`渠道「${c.channel}」已${c.isEnabled ? '启用' : '停用'}`)
+    await loadRecords()
+  } catch (e: any) {
+    ElMessage.error(e?.msg || e?.message || '保存失败')
+  } finally {
+    savingChannel.value = false
+  }
+}
 
 const acItems = [
   '趋势类规则(②③)触发预警(黄)，突破类(①⑤)触发报警(红)',
@@ -108,7 +151,12 @@ const acItems = [
           <el-table-column label="当前值" width="90">
             <template #default="{ row }"><span class="val">{{ row.val }}</span></template>
           </el-table-column>
-          <el-table-column prop="rule" label="触发规则" width="150" />
+          <el-table-column label="触发规则" width="200">
+            <template #default="{ row }">
+              <span v-if="row.rule">{{ row.rule }} {{ ruleMap[row.rule] || '' }}</span>
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
           <el-table-column label="级别" width="80">
             <template #default="{ row }"><span class="qms-pill" :class="row.lvl === '报警' ? 'r' : 'y'">{{ row.lvl }}</span></template>
           </el-table-column>
@@ -120,7 +168,7 @@ const acItems = [
           </el-table-column>
           <el-table-column label="操作" min-width="120">
             <template #default="{ row }">
-              <el-button v-if="row.st === '待确认'" type="primary" size="small" @click="openClose(row)">确认关闭</el-button>
+              <el-button v-if="row.st === '待确认'" type="primary" size="small" @click="openClose(row as SpcAlarm)">确认关闭</el-button>
               <span v-else class="muted">{{ row.reason || '-' }}</span>
             </template>
           </el-table-column>
@@ -148,8 +196,12 @@ const acItems = [
         <div class="qms-card__header"><h3>②通知渠道</h3></div>
         <div class="qms-card__body">
           <div class="check-list">
-            <label v-for="c in channels" :key="c.name"><el-checkbox v-model="c.on" /> {{ c.name }}</label>
+            <label v-for="c in channels" :key="c.id">
+              <el-checkbox v-model="c.isEnabled" :disabled="savingChannel" @change="() => saveChannel(c)" />
+              {{ c.channel }}
+            </label>
           </div>
+          <div class="muted" v-if="!channels.length">无通知渠道配置</div>
         </div>
       </div>
 
@@ -159,6 +211,27 @@ const acItems = [
           <div class="list-row"><span class="qms-pill b">抑制</span><span class="grow">30分钟内不重复</span><el-button size="small" @click="suppress">设置</el-button></div>
           <div class="list-row"><span class="qms-pill p">关闭</span><span class="grow">填原因+处置措施</span></div>
         </div>
+      </div>
+    </div>
+
+    <!-- 推送通知记录（报警触发后按启用渠道生成，留痕） -->
+    <div class="qms-card">
+      <div class="qms-card__header">
+        <h3>④推送通知记录</h3>
+        <el-button size="small" :loading="recordsLoading" @click="loadRecords">刷新</el-button>
+      </div>
+      <div class="qms-card__body">
+        <el-table :data="records" border size="small" v-loading="recordsLoading" empty-text="暂无推送记录（异常报警触发后自动生成）">
+          <el-table-column prop="alarmId" label="告警号" width="120" />
+          <el-table-column prop="channel" label="渠道" width="100" />
+          <el-table-column label="状态" width="90">
+            <template #default="{ row }">
+              <span class="qms-pill" :class="row.status === 'SENT' ? 'g' : (row.status === 'FAILED' ? 'r' : 'y')">{{ row.status }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="createdAt" label="推送时间" width="120" />
+          <el-table-column prop="message" label="内容" min-width="260" show-overflow-tooltip />
+        </el-table>
       </div>
     </div>
 
@@ -178,7 +251,7 @@ const acItems = [
       </el-form>
       <template #footer>
         <el-button @click="closeShow = false">取消</el-button>
-        <el-button type="primary" @click="doClose">确认关闭</el-button>
+        <el-button type="primary" :loading="closing" @click="doClose">确认关闭</el-button>
       </template>
     </el-dialog>
   </div>

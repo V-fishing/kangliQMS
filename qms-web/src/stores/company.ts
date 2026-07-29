@@ -12,13 +12,17 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { COMPANIES, COMPANY_KPI, EMPTY_PERM } from '@/mock/company'
 import type { Company, CompanyId, CompanyPerm, DemoAccount } from '@/types/company'
+import { systemApi } from '@/api/modules/system'
 
 export const useCompanyStore = defineStore('company', () => {
   /** 全部公司（数据驱动） */
   const companies = ref<Company[]>(COMPANIES)
 
   /** 当前上下文：具体公司 id 或 'GROUP' 或 空（未选） */
-  const currentCompanyId = ref<CompanyId | 'GROUP' | ''>('')
+  const currentCompanyId = ref<CompanyId | 'GROUP' | ''>(localStorage.getItem('qms_company') || '')
+
+  /** 组织代码 -> 真实 orgId(UUID) 映射，来自后端组织树，用于请求携带真实 org_id */
+  const orgCodeToId = ref<Record<string, string>>({})
 
   /** 账号可关联的公司 */
   const accountCompanies = ref<CompanyId[]>([])
@@ -46,21 +50,56 @@ export const useCompanyStore = defineStore('company', () => {
   const availableCompanies = computed(() =>
     companies.value.filter((c) => accountCompanies.value.includes(c.id)),
   )
+  /**
+   * 当前上下文对应的真实 org_id(UUID)。
+   * - 集团总览：返回空（由后端按 dataScope=all 返回全部）
+   * - 具体公司：优先用后端组织树解析出的 UUID，未加载完成时回退到公司代码(后端可反查)
+   * 用于各模块请求携带真实 org_id，避免把业务代码(MZ)当作 UUID 入库。
+   */
+  const currentOrgId = computed(() => {
+    if (isGroup.value) return ''
+    const code = currentCompanyId.value as string
+    return (orgCodeToId.value[code] as string) || code || ''
+  })
 
   // ---- actions ----
-  /** 登录成功后，用账号初始化公司上下文（尚未选定） */
+  /** 登录成功后，用账号初始化公司上下文（保留已选公司 if 合法） */
   function initFromAccount(acc: DemoAccount) {
     pendingAccount.value = acc
     accountCompanies.value = [...acc.companies]
     accountPerm.value = { ...acc.perm }
     isGroupAdmin.value = acc.isGroupAdmin
-    currentCompanyId.value = ''
+    // 保留已选公司（如果该公司在账号可关联列表中），否则重置为未选
+    const saved = localStorage.getItem('qms_company') || ''
+    if (saved && (acc.companies.includes(saved as CompanyId) || (saved === 'GROUP' && acc.isGroupAdmin))) {
+      currentCompanyId.value = saved as CompanyId | 'GROUP'
+    } else {
+      currentCompanyId.value = ''
+      localStorage.removeItem('qms_company')
+    }
+    // 拉取组织树，建立 组织代码 -> 真实 org_id(UUID) 映射，供请求携带真实 org_id
+    loadOrgIds()
+  }
+
+  /** 从后端组织树构建 组织代码 -> org_id(UUID) 映射 */
+  async function loadOrgIds() {
+    try {
+      const orgs = await systemApi.getOrgs()
+      const m: Record<string, string> = {}
+      for (const o of orgs) {
+        if (o.code) m[o.code] = o.id
+      }
+      orgCodeToId.value = m
+    } catch {
+      // 失败不阻断主流程： currentOrgId 会回退到公司代码，后端可反查
+    }
   }
 
   /** 首次强制选择某具体公司 */
   function selectCompany(id: CompanyId) {
     if (!accountCompanies.value.includes(id)) return
     currentCompanyId.value = id
+    localStorage.setItem('qms_company', id)
     pendingAccount.value = null
   }
 
@@ -68,6 +107,7 @@ export const useCompanyStore = defineStore('company', () => {
   function selectGroup() {
     if (!canSwitchGroup.value) return
     currentCompanyId.value = 'GROUP'
+    localStorage.setItem('qms_company', 'GROUP')
     pendingAccount.value = null
   }
 
@@ -75,17 +115,20 @@ export const useCompanyStore = defineStore('company', () => {
   function switchCompany(id: CompanyId) {
     if (!accountCompanies.value.includes(id)) return
     currentCompanyId.value = id
+    localStorage.setItem('qms_company', id)
   }
 
   /** 顶栏切换：免重登切换到集团总览 */
   function switchToGroup() {
     if (!canSwitchGroup.value) return
     currentCompanyId.value = 'GROUP'
+    localStorage.setItem('qms_company', 'GROUP')
   }
 
   /** 退出登录，清空上下文 */
   function reset() {
     currentCompanyId.value = ''
+    localStorage.removeItem('qms_company')
     accountCompanies.value = []
     accountPerm.value = { ...EMPTY_PERM }
     isGroupAdmin.value = false
@@ -120,6 +163,7 @@ export const useCompanyStore = defineStore('company', () => {
   return {
     companies,
     currentCompanyId,
+    orgCodeToId,
     accountCompanies,
     accountPerm,
     isGroupAdmin,
@@ -129,7 +173,9 @@ export const useCompanyStore = defineStore('company', () => {
     currentCompany,
     canSwitchGroup,
     availableCompanies,
+    currentOrgId,
     initFromAccount,
+    loadOrgIds,
     selectCompany,
     selectGroup,
     switchCompany,

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
-import { tools } from '@/mock/tlm'
+import { BANNERS } from '@/config/banners'
+import { tlmApi } from '@/api'
 import type { Tool } from '@/types/tlm'
 
 const authStore = useAuthStore()
@@ -12,7 +12,9 @@ const banner = BANNERS.tlm?.[authStore.role] || {
   desc: '一物一码建档、首件验证锁定、寿命强制下线与状态流转',
 }
 
-const list = ref<Tool[]>(JSON.parse(JSON.stringify(tools)))
+const list = ref<Tool[]>([])
+
+onMounted(async () => (list.value = await tlmApi.getTools()))
 
 const stMap: Record<string, string> = { 使用中: 'g', 维修中: 'b', 停用: 'gray', 报废: 'r' }
 function pillCls(s: string) { return stMap[s] || 'y' }
@@ -98,8 +100,6 @@ function openDetail(row: Tool) { current.value = row; detailVisible.value = true
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>工装台账（一物一码）</h3>
-        <span class="sr-tag">SR-TLM-001</span><span class="sr-tag">SR-TLM-006</span>
-        <span class="sr-tag">SR-TLM-013</span>
         <div style="margin-left:auto; display:flex; gap:8px">
           <el-button size="small" @click="checkForceRetire">寿命强制下线检查</el-button>
           <el-button size="small" type="primary" @click="openCreate">采购建档</el-button>

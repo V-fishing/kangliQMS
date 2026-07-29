@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
+useChartResize(() => [histInst, trendInst, pieInst])
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { BANNERS } from '@/config/banners'
 import CpkGauge from '@/components/charts/CpkGauge.vue'
 import KpiCard from '@/components/common/KpiCard.vue'
-import { spcKpi, spcHistogram, spcLevels, spcCpkTrend } from '@/mock/spc'
+import { spcApi } from '@/api'
+import type { SpcKpi, SpcLevel, SpcCpkTrend, SpcHistogram } from '@/types/spc'
 
 const authStore = useAuthStore()
 const banner = BANNERS.spc?.[authStore.role] || {
@@ -13,10 +16,31 @@ const banner = BANNERS.spc?.[authStore.role] || {
   desc: '过程能力指数、直方图与趋势分析',
 }
 
-const kpi = spcKpi
-const hist = spcHistogram
-const levels = spcLevels
-const trend = spcCpkTrend
+const kpi = ref<SpcKpi>({ cpk: 0, ppk: 0, alarm: 0, monitor: 0, passRate: 0, window: '', capPassRate: 0, capPassParams: '' })
+const hist = ref<SpcHistogram>({ bins: [], freq: [], usl: 0, lsl: 0 })
+const levels = ref<SpcLevel[]>([])
+const trend = ref<SpcCpkTrend>({ m: [], v: [] })
+
+async function loadAll() {
+  // 看板与趋势各自独立加载,任一路失败都不阻塞另一路(避免单接口异常拖垮整页弹"系统异常")
+  try {
+    const dash = await spcApi.getDashboard()
+    kpi.value = dash.kpi
+    levels.value = dash.levels
+  } catch (e) {
+    console.error('[SPC 能力分析] 看板加载失败', e)
+  }
+  try {
+    trend.value = await spcApi.getCpkTrend()
+  } catch {
+    trend.value = { m: [], v: [] }
+  }
+}
+onMounted(async () => {
+  await loadAll()
+  initCharts()
+  window.addEventListener('resize', resize)
+})
 
 const histRef = ref<HTMLDivElement>()
 const trendRef = ref<HTMLDivElement>()
@@ -26,7 +50,8 @@ let trendInst: echarts.ECharts | null = null
 let pieInst: echarts.ECharts | null = null
 
 function buildHist() {
-  const curve = hist.bins.map((b) => {
+  const h = hist.value
+  const curve = h.bins.map((b) => {
     const mu = 10.0
     const sig = 0.12
     return +(14 * Math.exp(-((b - mu) ** 2) / (2 * sig * sig))).toFixed(1)
@@ -35,13 +60,13 @@ function buildHist() {
     tooltip: { trigger: 'axis' },
     grid: { left: 42, right: 18, top: 24, bottom: 28 },
     legend: { data: ['频次', '正态分布'], bottom: 0, textStyle: { fontSize: 10 } },
-    xAxis: { type: 'category', data: hist.bins.map(String), name: '测量值', axisLabel: { fontSize: 10 } },
+    xAxis: { type: 'category', data: h.bins.map(String), name: '测量值', axisLabel: { fontSize: 10 } },
     yAxis: { type: 'value', axisLabel: { fontSize: 10 } },
     series: [
       {
         name: '频次',
         type: 'bar',
-        data: hist.freq,
+        data: h.freq,
         barWidth: '60%',
         itemStyle: { color: '#5b8def', borderRadius: [4, 4, 0, 0] },
         markLine: {
@@ -49,8 +74,8 @@ function buildHist() {
           symbol: 'none',
           lineStyle: { type: 'dashed' },
           data: [
-            { xAxis: hist.bins.indexOf(hist.lsl), lineStyle: { color: '#c0392b' }, label: { formatter: 'LSL', fontSize: 9, color: '#c0392b' } },
-            { xAxis: hist.bins.indexOf(hist.usl), lineStyle: { color: '#c0392b' }, label: { formatter: 'USL', fontSize: 9, color: '#c0392b' } },
+            { xAxis: h.bins.indexOf(h.lsl), lineStyle: { color: '#c0392b' }, label: { formatter: 'LSL', fontSize: 9, color: '#c0392b' } },
+            { xAxis: h.bins.indexOf(h.usl), lineStyle: { color: '#c0392b' }, label: { formatter: 'USL', fontSize: 9, color: '#c0392b' } },
           ],
         },
       },
@@ -60,15 +85,16 @@ function buildHist() {
 }
 
 function buildTrend() {
+  const t = trend.value
   return {
     tooltip: { trigger: 'axis' },
     grid: { left: 42, right: 18, top: 30, bottom: 28 },
-    xAxis: { type: 'category', data: trend.m, axisLabel: { fontSize: 11 } },
+    xAxis: { type: 'category', data: t.m, axisLabel: { fontSize: 11 } },
     yAxis: { type: 'value', min: 1.0, max: 1.6, axisLabel: { fontSize: 11 } },
     series: [
       {
         type: 'line',
-        data: trend.v,
+        data: t.v,
         smooth: true,
         symbol: 'circle',
         symbolSize: 7,
@@ -101,7 +127,7 @@ function buildPie() {
         center: ['50%', '45%'],
         itemStyle: { borderColor: '#fff', borderWidth: 2 },
         label: { formatter: '{b}:{c}', fontSize: 11 },
-        data: levels.map((l) => ({ name: l.name, value: l.value, itemStyle: { color: l.color } })),
+        data: levels.value.map((l) => ({ name: l.name, value: l.value, itemStyle: { color: l.color } })),
       },
     ],
   }
@@ -113,7 +139,6 @@ function initCharts() {
   if (pieRef.value) { pieInst = echarts.init(pieRef.value); pieInst.setOption(buildPie()) }
 }
 function resize() { histInst?.resize(); trendInst?.resize(); pieInst?.resize() }
-onMounted(() => { initCharts(); window.addEventListener('resize', resize) })
 onBeforeUnmount(() => { window.removeEventListener('resize', resize); histInst?.dispose(); trendInst?.dispose(); pieInst?.dispose() })
 watch([hist, trend, levels], () => { histInst?.setOption(buildHist()); trendInst?.setOption(buildTrend()); pieInst?.setOption(buildPie()) }, { deep: true })
 </script>

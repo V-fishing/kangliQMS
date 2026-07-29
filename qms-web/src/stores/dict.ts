@@ -1,10 +1,20 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { request } from '@/utils/request'
 
 /**
  * 字典 Store
  * 对应技术栈文档 §6.1: 字典首屏拉取并缓存（不良分类/工序/角色/状态枚举）
  */
+
+/** 后端字典 DTO（仅声明用到的字段） */
+interface BDict {
+  dictType?: string
+  dictKey?: string
+  dictValue?: string
+  [k: string]: unknown
+}
+
 export const useDictStore = defineStore('dict', () => {
   const defectCategories = ref([
     { label: '外观不良', value: 'appearance' },
@@ -36,10 +46,35 @@ export const useDictStore = defineStore('dict', () => {
     { label: '晚班', value: 'night' },
   ])
 
-  /** 首屏预取字典并缓存 */
+  const severities = ref([
+    { label: '严重', value: '严重' },
+    { label: '一般', value: '一般' },
+    { label: '轻微', value: '轻微' },
+  ])
+
+  /** 首屏预取字典并缓存；后端不可用时保持现有默认值 */
   async function preload() {
-    // Mock 模式数据已内置；后端就绪后替换为 API 拉取
+    try {
+      const res = await request.get<BDict[]>('/v1/dict')
+      const all: BDict[] = res ?? []
+      if (all.length === 0) return
+      // 按 dictType 分组映射，仅在拿到数据时覆盖默认值
+      const cats = all
+        .filter((d) => d.dictType === 'ncm_defect_category')
+        .map((d) => ({ label: String(d.dictValue ?? ''), value: String(d.dictKey ?? '') }))
+      if (cats.length) defectCategories.value = cats
+      const procs = all
+        .filter((d) => d.dictType === 'fia_task_status' || d.dictType === 'proc_name')
+        .map((d) => ({ label: String(d.dictValue ?? ''), value: String(d.dictKey ?? '') }))
+      if (procs.length) processes.value = procs
+      const sevs = all
+        .filter((d) => d.dictType === 'severity')
+        .map((d) => ({ label: String(d.dictValue ?? ''), value: String(d.dictKey ?? '') }))
+      if (sevs.length) severities.value = sevs
+    } catch {
+      // 保持现有默认值
+    }
   }
 
-  return { defectCategories, processes, statusEnums, shiftTypes, preload }
+  return { defectCategories, processes, statusEnums, shiftTypes, severities, preload }
 })

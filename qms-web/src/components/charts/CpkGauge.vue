@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import * as echarts from 'echarts/core'
+import { useChartResize } from '@/composables/useChartResize'
 import { GaugeChart } from 'echarts/charts'
 import { CanvasRenderer } from 'echarts/renderers'
 import { TooltipComponent } from 'echarts/components'
@@ -24,6 +25,7 @@ const props = withDefaults(
 
 const chartRef = ref<HTMLElement>()
 let chart: echarts.ECharts | null = null
+useChartResize(() => [chart])
 
 function getColor(val: number): string {
   if (val >= 1.33) return '#2f7d32'

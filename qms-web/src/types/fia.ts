@@ -11,6 +11,22 @@ export interface FiaKpi {
   overdue: number
 }
 
+/** 工单锁定记录(SR-FIA-022~026) */
+export interface FiaWoLock {
+  id?: string
+  woNo?: string
+  lockStatus: string      // 锁定 / 正常
+  lockReason?: string     // 首件未完成 / 首件不合格
+  lockedAt?: string
+  wipHold?: boolean       // 在制品待处理
+  unlockType?: string     // 自动解锁 / 紧急放行
+  unlockedAt?: string
+  approverId?: string
+  releaseReason?: string
+  traceTag?: string       // 放行追溯标签
+  taskCode?: string
+}
+
 export interface FiaTaskStatus {
   name: string
   value: number
@@ -35,6 +51,8 @@ export interface FiaLine {
 
 export interface FiaTask {
   id: string
+  /** 校验单号(如 FA-...),仅用于展示,不是数据库主键 */
+  code?: string
   wo: string
   line: string
   st: string
@@ -42,6 +60,19 @@ export interface FiaTask {
   who: string
   t: string
   u: number
+  /** 以下为详情/录入页扩展字段（列表接口可选返回） */
+  productName?: string
+  procName?: string
+  batchNo?: string
+  result?: string
+  /** 不合格处理路径:退货 / 返工 / 让步接收 */
+  disposition?: string
+  /** 供应商送检信息(供应商/送货单/联系人等),统一归入备注 */
+  remark?: string
+  /** 绑定的真实供应商(来自供应商质量库 sqm_supplier),后端仅存 supplierId */
+  supplierId?: string
+  /** 供应商名称(前端按 supplierId 从供应商质量库解析) */
+  supplierName?: string
 }
 
 export interface FiaApproval {
@@ -87,6 +118,9 @@ export interface FiaGauge {
 }
 
 export interface FiaStdlib {
+  /** 数据库主键 UUID；新建任务时作为 stdId 传给后端（绝不可用 code） */
+  id?: string
+  orgId?: string
   code: string
   mat: string
   proc: string
@@ -95,6 +129,58 @@ export interface FiaStdlib {
   ctq: string
   ver: string
   st: string
+  /** 来料批次驱动匹配键：物料编码 + 供应商ID */
+  partNo?: string
+  supplierId?: string
+  /** 检验项目明细（标准值 / 公差 / 单位等） */
+  items?: FiaStdItem[]
+}
+
+/**
+ * 检验标准库中的单个检验项：配置标准值、公差、单位后，建任务时自动带入检验录入。
+ * 字段与后端实体 ops.fia_insp_std_item 对齐（驼峰↔下划线映射见 api/modules/fia.ts）。
+ */
+export interface FiaStdItem {
+  id?: string
+  seq?: number
+  /** 检验项名称，如「长度」「外观」 */
+  name: string
+  /** 是否关键特性 CTQ */
+  ctq?: boolean
+  /** 标准值 */
+  std: string
+  /** 公差（±0.02 / ≥50 / 18-22 等文本规则） */
+  tol: string
+  /** 单位 */
+  unit: string
+  /** 检验项类型：数值 / 文本（对应后端 value_type 原始值） */
+  valueType?: string
+  /** 定性项枚举可选值，逗号分隔，如 "合格,不合格"（对应后端 enum_values） */
+  enumValues?: string
+  /** 规格上限（数值型自动判定用，对应后端 upper_limit） */
+  specUpper?: number
+  /** 规格下限（数值型自动判定用，对应后端 lower_limit） */
+  specLower?: number
+  /** 检验方法/项类型，对应后端 item_type */
+  itemType?: string
+}
+
+/** 新建首件检验任务的请求体（含来料批次驱动匹配键） */
+export interface FiaTaskCreate {
+  orgId: string
+  woNo: string
+  lineName: string
+  productName: string
+  procName: string
+  triggerType: string
+  stdId?: string
+  batchNo?: string
+  isUrgent?: boolean
+  remark?: string
+  /** 来料批次驱动匹配键 */
+  partNo?: string
+  supplierId?: string
+  lotId?: string
 }
 
 export interface FiaInspItem {
@@ -122,6 +208,7 @@ export interface FiaInspMeta {
 
 /** 检验录入项（对应 HTML MOCKX.fia.inspItems，可录入实测值） */
 export interface FiaInspEntry {
+  id?: string
   no: number
   name: string
   /** 是否关键 CTQ 特性 */
@@ -136,6 +223,10 @@ export interface FiaInspEntry {
   val: string
   /** 缺陷类项（外观）用选择而非输入 */
   select?: boolean
+  /** 判定：合格 / 不合格 */
+  result?: string
+  /** 是否已签名 */
+  signed?: boolean
 }
 
 export interface FiaStdlibDetail extends FiaStdlib {
@@ -187,8 +278,9 @@ export interface FiaArchived {
   perm: string
 }
 
-/** 触发事件类型（对应 HTML MOCKX.fia.trigTypes） */
+/** 触发事件类型（对应后端 FiaTriggerType: id/typeName/description/enabled） */
 export interface FiaTrigType {
+  id?: string
   name: string
   enabled: boolean
   desc: string
@@ -225,7 +317,8 @@ export interface FiaSigConfig {
 export interface FiaTrigConfig {
   triggers: FiaTrigType[]
   intercept: FiaIntercept
-  signature: FiaSigConfig
+  /** 电子签名配置已迁移至「系统管理 / 配置中心」独立维护，此处不再承载 */
+  signature?: FiaSigConfig
 }
 
 export interface FiaFlowNode {

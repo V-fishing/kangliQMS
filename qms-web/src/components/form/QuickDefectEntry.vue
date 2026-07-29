@@ -1,10 +1,17 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
 import ScanInput from '@/components/common/ScanInput.vue'
 import PhotoWatermark from '@/components/common/PhotoWatermark.vue'
+import { ncmApi } from '@/api'
 import { useDictStore } from '@/stores/dict'
 
 const dictStore = useDictStore()
+
+const defectDicts = ref<any[]>([])
+onMounted(async () => {
+  try { defectDicts.value = await ncmApi.getDict() } catch (e) { defectDicts.value = [] }
+})
 
 const emit = defineEmits<{
   submit: [data: {
@@ -15,6 +22,7 @@ const emit = defineEmits<{
     desc: string
     photo?: string
     sev: string
+    batchTotal?: number
   }]
 }>()
 
@@ -23,6 +31,7 @@ const batchNo = ref('')
 const type = ref('')
 const proc = ref('')
 const count = ref(1)
+const batchTotal = ref<number | undefined>(undefined)
 const desc = ref('')
 const sev = ref('一般')
 const photo = ref('')
@@ -53,6 +62,7 @@ function submit() {
     desc: desc.value,
     photo: photo.value,
     sev: sev.value,
+    batchTotal: batchTotal.value || undefined,
   })
   // 重置
   step.value = 1
@@ -60,10 +70,10 @@ function submit() {
   type.value = ''
   proc.value = ''
   count.value = 1
+  batchTotal.value = undefined
   desc.value = ''
   sev.value = '一般'
   photo.value = ''
-  ElMessage.success('不良已提交')
 }
 
 function onCapture(data: { photo: string }) {
@@ -96,7 +106,7 @@ function onCapture(data: { photo: string }) {
         </el-form-item>
         <el-form-item label="不良类型">
           <el-select v-model="type" placeholder="选择不良类型" style="width: 100%">
-            <el-option v-for="d in dictStore.defectCategories" :key="d.value" :label="d.label" :value="d.label" />
+            <el-option v-for="d in defectDicts" :key="d.code" :label="d.name" :value="d.code" />
           </el-select>
         </el-form-item>
         <el-form-item label="工序">
@@ -106,6 +116,10 @@ function onCapture(data: { photo: string }) {
         </el-form-item>
         <el-form-item label="数量">
           <el-input-number v-model="count" :min="1" />
+        </el-form-item>
+        <el-form-item label="抽检/来料总数">
+          <el-input-number v-model="batchTotal" :min="0" />
+          <span class="hint-inline">（用于计算真实不良率，选填）</span>
         </el-form-item>
         <el-form-item>
           <el-button type="primary" @click="nextStep">下一步</el-button>
@@ -176,6 +190,12 @@ function onCapture(data: { photo: string }) {
     &.done {
       .num { background: #2f7d32; color: #fff; }
     }
+  }
+
+  .hint-inline {
+    margin-left: 8px;
+    font-size: 12px;
+    color: #8a9bb0;
   }
 }
 </style>

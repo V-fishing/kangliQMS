@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, reactive } from 'vue'
+import { ref, computed, reactive, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
-import { capaList } from '@/mock/sqm'
+import { BANNERS } from '@/config/banners'
+import { sqmApi } from '@/api'
 import type { Capa, CapaStage } from '@/types/sqm'
 
 const authStore = useAuthStore()
@@ -12,10 +12,33 @@ const banner = BANNERS.sqm?.[authStore.role] || {
   desc: '纠正措施(CA)与预防措施(PA)双线跟踪，效果验证后关闭归档',
 }
 
-// 演示当前时钟（用于超期计算）
-const TODAY = '2025-02-05'
+// 当前时钟（用于超期计算）
+const TODAY = new Date().toISOString().slice(0, 10)
 
-const list = ref<Capa[]>([...capaList])
+// CAPA 阶段定义（与后端 progress 0~100 对应，6 个里程碑）
+const CAPA_STAGE_NAMES = ['识别与立项', '根本原因分析', '纠正措施(CA)', '预防措施(PA)', '实施效果验证', '关闭归档']
+/** 依据后端 progress/status 派生前端阶段条（后端未单独存阶段，故前端合成） */
+function deriveStages(progress: number, status: string): CapaStage[] {
+  const done = status === '已关闭' ? 6 : Math.min(6, Math.round((progress || 0) / 100 * 6))
+  return CAPA_STAGE_NAMES.map((name, i) => ({
+    key: `c${i + 1}`,
+    name,
+    status: i < done ? 'done' : i === done ? 'doing' : 'pending',
+    approval: i >= 4,
+  } as CapaStage))
+}
+
+// 调用真实接口加载 CAPA 列表
+const list = ref<Capa[]>([])
+async function loadData() {
+  try {
+    const raw = await sqmApi.getCapaList()
+    list.value = raw.map((c) => ({ ...c, stages: deriveStages(c.progress || 0, c.status) }))
+  } catch (e) {
+    // 错误已由 request 拦截器统一提示
+  }
+}
+onMounted(loadData)
 
 // 默认手动触发（SR-PTL-019）：用户点击触发，不自动创建重复 CAPA
 const capaAuto = ref(false)
@@ -62,29 +85,28 @@ function openCreate() {
   newCapa.owner = ''; newCapa.dueDate = ''; newCapa.source = '8D手动触发'; newCapa.sourceId = ''
   createVisible.value = true
 }
-function submitCreate() {
+async function submitCreate() {
   if (!newCapa.title.trim() || !newCapa.problem.trim() || !newCapa.owner.trim()) {
     ElMessage.warning('请填写标题、问题与责任人')
     return
   }
-  const id = `CAPA-2025-${String(list.value.length + 1).padStart(3, '0')}`
-  list.value.unshift({
-    id, type: newCapa.type, source: newCapa.source, sourceId: newCapa.sourceId || undefined,
-    title: newCapa.title.trim(), problem: newCapa.problem.trim(), rootcause: newCapa.rootcause.trim(),
-    corrective: { action: '—', owner: newCapa.owner, due: newCapa.dueDate || '—', status: '待执行' },
-    preventive: { action: '—', owner: newCapa.owner, due: newCapa.dueDate || '—', status: '待执行' },
-    owner: newCapa.owner, dueDate: newCapa.dueDate || '—', status: '原因分析', effResult: null,
-    stages: [
-      { key: 'c1', name: '识别与立项', status: 'done', date: TODAY, operator: authStore.currentRole?.name || '质量' },
-      { key: 'c2', name: '根本原因分析', status: 'doing', operator: newCapa.owner, approval: false },
-      { key: 'c3', name: '纠正措施(CA)', status: 'pending', approval: false },
-      { key: 'c4', name: '预防措施(PA)', status: 'pending', approval: false },
-      { key: 'c5', name: '实施效果验证', status: 'pending', approval: true },
-      { key: 'c6', name: '关闭归档', status: 'pending', approval: true },
-    ],
-  })
-  createVisible.value = false
-  ElMessage.success(`CAPA ${id} 已手动创建（双盲线 CA/PA 跟踪）`)
+  try {
+    await sqmApi.createCapa({
+      capaNo: newCapa.title.trim(),
+      capaType: newCapa.type,
+      issue: newCapa.problem.trim(),
+      rootcause: newCapa.rootcause.trim(),
+      owner: newCapa.owner,
+      dueDate: newCapa.dueDate || undefined,
+      triggerType: newCapa.source,
+      abnormalId: newCapa.sourceId || undefined,
+    })
+    createVisible.value = false
+    ElMessage.success(`CAPA ${newCapa.title.trim()} 已创建（双盲线 CA/PA 跟踪）`)
+    await loadData()
+  } catch (e) {
+    // 错误已由 request 拦截器统一提示
+  }
 }
 
 // 详情
@@ -95,32 +117,25 @@ function showDetail(c: Capa) {
   detailVisible.value = true
 }
 
-function mapStageStatus(name: string): Capa['status'] {
-  if (name.includes('识别')) return '原因分析'
-  if (name.includes('根因')) return '原因分析'
-  if (name.includes('纠正措施')) return '措施制定'
-  if (name.includes('预防')) return '措施制定'
-  if (name.includes('效果')) return '效果确认'
-  return '实施验证'
-}
-function advance(c: Capa) {
-  const idx = c.stages.findIndex((s) => s.status !== 'done')
-  if (idx >= 0) {
-    c.stages[idx].status = 'done'
-    c.stages[idx].date = TODAY
-    c.stages[idx].operator = authStore.currentRole?.name || '质量'
-    if (idx + 1 < c.stages.length) c.stages[idx + 1].status = 'doing'
-  }
-  if (c.stages.every((s) => s.status === 'done')) {
-    c.status = '已关闭'
-    c.closeDate = TODAY
-    c.closeAuditor = authStore.currentRole?.name || '质量'
-    c.archived = true
-    ElMessage.success(`${c.id} 已关闭归档（只读，保留≥15年）`)
-  } else {
-    const next = c.stages.find((s) => s.status === 'doing')
-    if (next) { c.status = mapStageStatus(next.name) }
-    ElMessage.success(`${c.id} 推进至：${next?.name}`)
+async function advance(c: Capa) {
+  const done = Math.min(6, Math.round((c.progress || 0) / 100 * 6))
+  if (done >= 6) return
+  const nextDone = done + 1
+  const nextProgress = Math.round(nextDone / 6 * 100)
+  try {
+    if (nextDone >= 6) {
+      await sqmApi.closeCapa(c.id)
+      ElMessage.success(`${c.id} 已关闭归档（只读，保留≥15年）`)
+    } else {
+      await sqmApi.updateCapaProgress(c.id, nextProgress)
+      ElMessage.success(`${c.id} 推进至：${CAPA_STAGE_NAMES[nextDone - 1]}`)
+    }
+    // 直接突变 cur 对象的 progress / stages,弹窗立即反映（不依赖 loadData 的异步引用找匹配）
+    c.progress = nextProgress
+    c.stages = deriveStages(nextProgress, c.status)
+    loadData()  // 后台异步刷新列表（不影响 UI 即时反馈）
+  } catch (e) {
+    // 错误已由 request 拦截器统一提示
   }
 }
 </script>
@@ -149,30 +164,32 @@ function advance(c: Capa) {
       <div class="kpi"><div class="val" style="color: #c0392b">{{ overdue }}</div><div class="lbl">超期</div></div>
     </div>
 
-    <!-- 工具栏 -->
-    <div class="toolbar">
-      <select v-model="fType" class="qms-select">
-        <option value="">全部类型</option><option>纠正措施</option><option>预防措施</option><option>系统改进</option>
-      </select>
-      <select v-model="fStatus" class="qms-select">
-        <option value="">全部状态</option><option>待启动</option><option>原因分析</option><option>措施制定</option><option>实施验证</option><option>效果确认</option><option>已关闭</option>
-      </select>
-      <input v-model="fSearch" type="text" class="qms-input" placeholder="搜索 CAPA 编号或问题..." />
-      <span class="sp" />
-      <button class="btn pri" @click="openCreate">+ 手动触发 CAPA</button>
-    </div>
+    <!-- 工具栏已整合到表卡片 header -->
 
-    <!-- CAPA 列表 -->
+
+    <!-- CAPA 列表（表卡片 header 整合筛选 + 类型 seg，统 FMEA 设计） -->
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>CAPA 纠正与预防措施清单</h3>
+        <div class="seg">
+          <button :class="['seg-btn', { on: fType === '' }]" @click="fType = ''">全部类型</button>
+          <button :class="['seg-btn', { on: fType === '纠正措施' }]" @click="fType = '纠正措施'">纠正措施</button>
+          <button :class="['seg-btn', { on: fType === '预防措施' }]" @click="fType = '预防措施'">预防措施</button>
         </div>
-      <div class="qms-card__body" style="padding: 0; overflow-x: auto">
+        <div class="grow"></div>
+        <input v-model="fSearch" type="text" class="qms-input" placeholder="搜索 CAPA 编号..." style="width:160px" />
+        <select v-model="fStatus" class="qms-select" style="width:110px">
+          <option value="">全部状态</option><option>待启动</option><option>实施中</option><option>待审批</option><option>已验证</option><option>已关闭</option>
+        </select>
+        <button class="btn pri sm" @click="openCreate">+ 手动触发 CAPA</button>
+      </div>
+      <div class="qms-card__body sticky-wrap">
         <table class="tbl" style="min-width: 1040px">
           <thead>
             <tr>
               <th>CAPA编号</th><th>类型</th><th>触发来源</th><th>标题</th><th>责任人</th>
-              <th>截止日期</th><th>效果验证</th><th>状态</th><th>操作</th>
+              <th>截止日期</th><th>效果验证</th><th>状态</th>
+              <th class="col-fixed">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -190,7 +207,7 @@ function advance(c: Capa) {
                 <span v-else class="qms-pill y">待验证</span>
               </td>
               <td><span class="qms-pill" :class="statusPill(c.status)">{{ c.status }}</span></td>
-              <td><button class="btn sm" @click="showDetail(c)">详情</button></td>
+              <td class="col-fixed"><button class="btn sm" @click="showDetail(c)">详情</button></td>
             </tr>
             <tr v-if="filtered.length === 0"><td colspan="9" class="muted" style="text-align:center;padding:20px">无匹配数据</td></tr>
           </tbody>
@@ -201,6 +218,18 @@ function advance(c: Capa) {
     <!-- 详情弹窗 -->
     <el-dialog v-model="detailVisible" :title="`CAPA 详情 · ${cur?.id || ''}`" width="720px">
       <div v-if="cur" class="capa-detail">
+        <!-- TODO：功能流程未定，具体待实现 -->
+        <div class="capa-placeholder">
+          <div class="capa-placeholder__icon">🚧</div>
+          <div class="capa-placeholder__body">
+            <div class="capa-placeholder__title">CAPA 阶段流程未定，具体待实现</div>
+            <div class="capa-placeholder__desc">
+              当前仅支持纯数字进度推进；真正的 6 阶段门控
+              （识别与立项→根因分析→CA→PA→效果验证→关闭归档）尚在规划中，
+              后续将参照 8D 的 <code>qms_capa_stage</code> 表实现阶段内容存储与强制审核。
+            </div>
+          </div>
+        </div>
         <el-descriptions :column="2" border size="small">
           <el-descriptions-item label="类型"><span class="qms-pill" :class="typePill(cur.type)">{{ cur.type }}</span></el-descriptions-item>
           <el-descriptions-item label="状态"><span class="qms-pill" :class="statusPill(cur.status)">{{ cur.status }}</span></el-descriptions-item>
@@ -294,6 +323,26 @@ function advance(c: Capa) {
 
 <style scoped lang="scss">
 .sqm-capa { display: flex; flex-direction: column; gap: 14px; }
+
+/* 原生表格"操作"列右固定（与 el-table fixed="right" 等效） */
+.sticky-wrap { overflow-x: auto; padding: 0; }
+.sticky-wrap .tbl th.col-fixed,
+.sticky-wrap .tbl td.col-fixed {
+  position: sticky; right: 0; z-index: 1;
+  background: #fff; box-shadow: -2px 0 4px rgba(0,0,0,.06);
+  min-width: 80px;
+}
+.sticky-wrap .tbl thead th.col-fixed { background: #f4f8ff; }
+
+/* 头部 seg / grow（统一 FMEA 设计） */
+.seg { display: inline-flex; gap: 4px; }
+.seg-btn {
+  border: 1px solid #dbe7f7; background: #fff; border-radius: 4px;
+  padding: 3px 10px; font-size: 12px; cursor: pointer; transition: 0.15s; color: #5a6b7e;
+  &:hover { border-color: #1e4d8b; color: #1e4d8b; }
+  &.on { background: #1e4d8b; border-color: #1e4d8b; color: #fff; }
+}
+.grow { flex: 1; }
 .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; .sp { flex: 1 1 auto; } }
 .qms-select, .qms-input {
   height: 32px; border: 1px solid var(--line, #d8dee6); border-radius: 6px; padding: 0 10px;
@@ -321,6 +370,23 @@ textarea.qms-input { height: auto; padding: 8px 10px; resize: vertical; }
 .smeta { font-size: 10px; color: #8a94a6; }
 .sline { flex: 1; border-top: 2px dashed #d1d5db; margin-top: 17px; min-width: 12px; }
 .archived-flag { margin-top: 12px; background: #eef2f7; border: 1px solid #dfe6ee; border-radius: 6px; padding: 8px 10px; font-size: 12px; color: #44515f; }
+// CAPA 未定功能标注
+.capa-placeholder {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  background: #fff8e1;
+  border: 1px solid #f0c14b;
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  &__icon { font-size: 24px; line-height: 1; }
+  &__title { font-size: 13.5px; font-weight: 600; color: #b58a00; }
+  &__desc { font-size: 12px; color: #7a6500; margin-top: 4px; line-height: 1.6;
+    code { background: rgba(0,0,0,0.06); padding: 1px 5px; border-radius: 3px; font-size: 11px; }
+  }
+}
+
 .form-row { display: flex; flex-direction: column; gap: 6px; }
 .form-row label { font-size: 13px; color: #44515f; margin-top: 6px; }
 .btn {

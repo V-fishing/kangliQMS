@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
 
 export interface TrendSeries {
   name: string
@@ -30,6 +31,7 @@ const props = withDefaults(defineProps<{
 
 const chartRef = ref<HTMLDivElement>()
 let inst: echarts.ECharts | null = null
+useChartResize(() => [inst])
 
 function hexToRgba(hex: string, a: number): string {
   const h = hex.replace('#', '')

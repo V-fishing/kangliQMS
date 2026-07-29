@@ -34,5 +34,18 @@
     "src/**/*.vue",
     "src/types/**/*.d.ts"
   ],
-  "exclude": ["src/api/**", "dist/**", "node_modules/**"]
+  "exclude": [
+    "src/api/modules/auth.ts",
+    "src/api/modules/fia.ts",
+    "src/api/modules/ncm.ts",
+    "src/api/modules/overview.ts",
+    "src/api/modules/qsm.ts",
+    "src/api/modules/spc.ts",
+    "src/api/modules/sqm.ts",
+    "src/api/modules/system.ts",
+    "src/api/modules/tlm.ts",
+    "src/mock/**",
+    "dist/**",
+    "node_modules/**"
+  ]
 }

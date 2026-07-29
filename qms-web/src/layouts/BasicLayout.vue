@@ -3,545 +3,298 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useAppStore } from '@/stores/app'
-import { useUserStore } from '@/stores/user'
 import { useCompanyStore } from '@/stores/company'
-import { ROLES, type RoleId } from '@/mock/roles'
+import { usePermissionStore } from '@/stores/permission'
+import { MODULE_MENU_GROUPS } from '@/permission'
 import type { CompanyId } from '@/types/company'
-import { getMockMenuTree } from '@/mock/system'
+import { ROLES, type RoleId } from '@/mock/roles'
 
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const appStore = useAppStore()
-const userStore = useUserStore()
 const companyStore = useCompanyStore()
+const permStore = usePermissionStore()
 
-const menus = getMockMenuTree()
-const roleMenuOpen = ref(false)
-const companyMenuOpen = ref(false)
+// ── 侧边栏：分组 + 折叠 ──────────────────────────────
+
+/** 展开的菜单组索引（默认第一个展开，其余折叠） */
+const expandedGroups = ref<number[]>([0])
+
+function toggleGroup(idx: number) {
+  const i = expandedGroups.value.indexOf(idx)
+  if (i >= 0) expandedGroups.value.splice(i, 1)
+  else expandedGroups.value.push(idx)
+}
+
+/** 当前角色可见的菜单组 */
+const visibleGroups = computed(() =>
+  MODULE_MENU_GROUPS
+    .map((group) => ({
+      ...group,
+      items: group.items.filter((item) =>
+        item.roles.includes(authStore.currentRole?.id ?? '') || permStore.isAdmin,
+      ),
+    }))
+    .filter((group) => group.items.length > 0),
+)
+
+const activeModule = computed(() => (route.meta.module as string) || 'overview')
+const activePath = computed(() => '/' + route.path.split('/').filter(Boolean).slice(0, 2).join('/'))
+
+// ── 顶栏 ────────────────────────────────────────────
+
+const devPanelOpen = ref(false)
 const clock = ref('')
-
 let timer: ReturnType<typeof setInterval>
 
 function tickClock() {
-  const d = new Date()
-  const p = (n: number) => String(n).padStart(2, '0')
-  clock.value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  const d = new Date(); const p = (n: number) => String(n).padStart(2, '0')
+  clock.value = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-onMounted(() => {
-  tickClock()
-  timer = setInterval(tickClock, 1000)
-  userStore.refreshTodoCount()
-  userStore.refreshNotice()
-})
-
+onMounted(() => { tickClock(); timer = setInterval(tickClock, 30000) })
 onUnmounted(() => clearInterval(timer))
 
-const activeModule = computed(() => (route.meta.module as string) || 'overview')
+// ── 导航 ────────────────────────────────────────────
 
-/** 当前模块的二级子页面（用于顶部标签栏） */
-const subTabs = computed(() => {
-  const menu = menus.find((m) => m.module === activeModule.value)
-  return menu?.children ?? []
-})
-
-/** 当前激活的二级标签 path（如 dash / flow） */
-const activeTab = computed(() => {
-  const seg = route.path.split('/').filter(Boolean)
-  return seg[1] || ''
-})
-
-function switchModule(path: string) {
-  router.push(`/${path}`)
+function navigate(path: string) {
+  router.push(path)
 }
 
-function switchTab(tabPath: string) {
-  router.push(`/${activeModule.value}/${tabPath}`)
-}
+function switchCompany(id: CompanyId) { companyStore.switchCompany(id); companyMenuOpen.value = false }
+function switchToGroup() { companyStore.switchToGroup(); companyMenuOpen.value = false }
 
-function switchRole(role: RoleId) {
-  authStore.switchRole(role)
-  roleMenuOpen.value = false
-  // 刷新当前页面
-  router.replace(route.fullPath)
-}
-
-/** 顶栏切换公司（免重登） */
-function switchCompany(id: CompanyId) {
-  companyStore.switchCompany(id)
-  companyMenuOpen.value = false
-}
-function switchToGroup() {
-  companyStore.switchToGroup()
-  companyMenuOpen.value = false
-}
-
-function getFirstPath(module: string): string {
-  const menu = menus.find((m) => m.path === module)
-  if (menu?.children?.length) {
-    return `/${module}/${menu.children[0].path}`
-  }
-  return `/${module}`
-}
+const companyMenuOpen = ref(false)
 </script>
 
 <template>
-  <div class="app-layout">
+  <div class="app-shell">
+    <!-- ═══ 顶栏 ═══ -->
     <header class="topbar">
       <div class="brand">
-        <div class="logo">KL</div>
-        <span class="title">康立质量过程管理系统</span>
-        <small>QMS</small>
+        <span class="brand-icon">KL</span>
+        <span class="brand-title">康立 QMS</span>
       </div>
+
+      <div class="topbar-center">
+        <span class="env-badge">开发环境</span>
+      </div>
+
       <div class="topbar-right">
-        <span class="watermark">演示静态数据</span>
-
-        <!-- 当前公司切换器（多分公司上下文） -->
-        <div class="company-switcher">
-          <button class="company-btn" @click="companyMenuOpen = !companyMenuOpen">
-            <span
-              class="dot"
-              :style="{ background: companyStore.isGroup ? '#7a5bb0' : companyStore.currentCompany?.color || '#5b8def' }"
-            ></span>
-            <span class="ctx">{{ companyStore.contextLabel() }}</span>
-            <span v-if="!companyStore.isGroup" class="perm">{{
-              companyStore.currentCompany ? companyStore.accountPerm[companyStore.currentCompany.id] : ''
-            }}</span>
+        <!-- 公司切换 -->
+        <div class="company-picker">
+          <button class="cp-btn" @click="companyMenuOpen = !companyMenuOpen">
+            <span class="dot" :style="{ background: companyStore.isGroup ? '#7a5bb0' : companyStore.currentCompany?.color || '#5b8def' }" />
+            {{ companyStore.contextLabel() }}
             <span class="arrow">▾</span>
           </button>
-          <div v-show="companyMenuOpen" class="company-menu" @click.stop>
-            <div class="cm-head">切换公司上下文（免重新登录）</div>
-            <div
-              v-for="c in companyStore.availableCompanies"
-              :key="c.id"
-              class="cm-opt"
-              :class="{ active: !companyStore.isGroup && companyStore.currentCompanyId === c.id }"
-              @click="switchCompany(c.id)"
-            >
-              <span class="dot" :style="{ background: c.color }"></span>
-              <span class="nm">{{ c.shortName }}</span>
-              <span class="pm">{{ companyStore.accountPerm[c.id] }}</span>
+          <div v-show="companyMenuOpen" class="cp-drop" @click.stop>
+            <div v-for="c in companyStore.availableCompanies" :key="c.id" class="cp-opt"
+                 :class="{ active: !companyStore.isGroup && companyStore.currentCompanyId === c.id }"
+                 @click="switchCompany(c.id)">
+              <span class="dot" :style="{ background: c.color }" /> {{ c.shortName }}
+              <small>{{ companyStore.accountPerm[c.id] }}</small>
             </div>
-            <div
-              v-if="companyStore.canSwitchGroup"
-              class="cm-opt group"
-              :class="{ active: companyStore.isGroup }"
-              @click="switchToGroup()"
-            >
-              <span class="dot" style="background: #7a5bb0"></span>
-              <span class="nm">集团总览</span>
-              <span class="pm">只读</span>
+            <div v-if="companyStore.canSwitchGroup" class="cp-opt group"
+                 :class="{ active: companyStore.isGroup }" @click="switchToGroup()">
+              <span class="dot" style="background:#7a5bb0" /> 集团总览 <small>只读</small>
             </div>
           </div>
         </div>
 
-        <div class="role-switcher">
-          <button class="role-btn" @click="roleMenuOpen = !roleMenuOpen">
-            <span class="dot" :style="{ background: authStore.currentRole?.color }"></span>
-            {{ authStore.currentRole?.name }}
-            <span class="arrow">▾</span>
-          </button>
-          <div v-show="roleMenuOpen" class="role-menu" @click.stop>
-            <div
-              v-for="r in ROLES"
-              :key="r.id"
-              class="role-opt"
-              :class="{ active: authStore.role === r.id }"
-              @click="switchRole(r.id)"
-            >
-              <span class="dot" :style="{ background: r.color }"></span>
-              <span>{{ r.icon }} {{ r.name }}</span>
-              <span class="desc">{{ r.perm.slice(0, 8) }}…</span>
-            </div>
-          </div>
-        </div>
+        <!-- 用户 -->
+        <span class="user-label">{{ authStore.userName || authStore.account }}</span>
+        <button class="icon-btn" title="退出" @click="authStore.logout()">⏻</button>
 
+        <!-- 开发面板 -->
+        <button class="icon-btn dev-toggle" @click="devPanelOpen = !devPanelOpen" title="开发工具">⚙</button>
         <span class="clock">{{ clock }}</span>
       </div>
     </header>
+
     <div class="body">
-      <nav class="sidebar" :class="{ collapsed: appStore.sidebarCollapsed }">
-        <div class="nav-group">主导航</div>
-        <div
-          v-for="m in menus"
-          :key="m.path"
-          class="nav-item"
-          :class="{ active: activeModule === m.module }"
-          @click="switchModule(getFirstPath(m.path).slice(1))"
-        >
-          <span class="ico">{{ m.icon }}</span>
-          <span>{{ m.title }}</span>
-        </div>
-      </nav>
-      <main class="content-wrap">
-        <nav v-if="subTabs.length" class="sub-tabs">
-          <div
-            v-for="t in subTabs"
-            :key="t.path"
-            class="sub-tab"
-            :class="{ active: activeTab === t.path }"
-            @click="switchTab(t.path)"
-          >
-            <span class="ico">{{ t.icon }}</span>
-            <span>{{ t.title }}</span>
+      <!-- ═══ 侧边栏 ═══ -->
+      <aside class="sidebar" :class="{ collapsed: appStore.sidebarCollapsed }">
+        <div class="sidebar-scroll">
+          <div v-for="(group, gi) in visibleGroups" :key="gi" class="nav-group">
+            <div class="nav-group-label" @click="toggleGroup(gi)">
+              <span class="expand-icon">{{ expandedGroups.includes(gi) ? '▾' : '▸' }}</span>
+              {{ group.label }}
+            </div>
+            <div v-show="expandedGroups.includes(gi)" class="nav-group-items">
+              <router-link
+                v-for="item in group.items"
+                :key="item.path"
+                :to="item.path"
+                class="nav-link"
+                :class="{ active: activeModule === item.path.slice(1).split('/')[0] }"
+              >
+                <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
+                <span>{{ item.title }}</span>
+              </router-link>
+            </div>
           </div>
-        </nav>
-        <div class="content">
-          <RouterView v-slot="{ Component }">
-            <transition name="fade">
-              <component :is="Component" :key="route.fullPath + '#' + companyStore.currentCompanyId" />
-            </transition>
-          </RouterView>
         </div>
+
+        <!-- 折叠按钮 -->
+        <div class="sidebar-fold" @click="appStore.toggleSidebar()">
+          {{ appStore.sidebarCollapsed ? '▶' : '◀' }}
+        </div>
+      </aside>
+
+      <!-- ═══ 主内容 ═══ -->
+      <main class="main">
+        <RouterView v-slot="{ Component, route: r }">
+          <transition name="page-fade" mode="out-in">
+            <keep-alive :max="20">
+              <component :is="Component" :key="r.fullPath + '#' + companyStore.currentCompanyId" />
+            </keep-alive>
+          </transition>
+        </RouterView>
       </main>
     </div>
+
+    <!-- ═══ 开发面板（角色切换等） ═══ -->
+    <Transition name="slide-up">
+      <div v-if="devPanelOpen" class="dev-panel">
+        <div class="dev-title">开发工具 · 角色切换</div>
+        <div class="dev-roles">
+          <button v-for="r in ROLES" :key="r.id"
+            class="dev-role-btn"
+            :class="{ active: authStore.role === r.id }"
+            @click="authStore.switchRole(r.id); router.replace(route.fullPath)">
+            <span class="dot" :style="{ background: r.color }" />
+            {{ r.icon }} {{ r.name }}
+          </button>
+        </div>
+      </div>
+    </Transition>
   </div>
 </template>
 
-<style scoped lang="scss">
-.app-layout {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
+<style lang="scss">
+/* ═══ Design Tokens ═══ */
+$c-brand:   #1e4d8b;
+$c-brand-l: #2a6bb0;
+$c-sidebar: #10243e;
+$c-bg:      #f4f6f9;
+$c-border:  #e4e8ee;
+$c-text:    #2c3e50;
+$c-text-l:  #6b7d95;
+$c-active-bg: rgba(30, 77, 139, 0.08);
+$c-active-tx: $c-brand;
+
+/* ═══ Shell ═══ */
+.app-shell {
+  display: flex; flex-direction: column; height: 100vh; overflow: hidden;
+  font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  color: $c-text; background: $c-bg;
 }
 
+/* ── Topbar ── */
 .topbar {
-  height: 56px;
-  background: linear-gradient(90deg, #1e4d8b, #2a6bb0);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  padding: 0 20px;
-  flex-shrink: 0;
-  box-shadow: 0 2px 6px rgba(16, 42, 71, 0.15);
-  z-index: 20;
+  height: 48px; background: $c-brand; color: #fff;
+  display: flex; align-items: center; padding: 0 16px; flex-shrink: 0;
+  box-shadow: 0 1px 4px rgba(0,0,0,.12); z-index: 30;
+}
+.brand { display: flex; align-items: center; gap: 8px; }
+.brand-icon {
+  width: 26px; height: 26px; border-radius: 5px; background: #fff; color: $c-brand;
+  display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 13px;
+}
+.brand-title { font-size: 15px; font-weight: 600; letter-spacing: .5px; }
+
+.topbar-center { flex: 1; display: flex; justify-content: center; }
+.env-badge { font-size: 11px; background: rgba(255,255,255,.15); padding: 2px 8px; border-radius: 10px; }
+
+.topbar-right { display: flex; align-items: center; gap: 10px; }
+.user-label { font-size: 13px; opacity: .85; }
+.icon-btn { background: none; border: none; color: #fff; font-size: 16px; cursor: pointer; padding: 4px 6px; border-radius: 4px; opacity: .75; &:hover { opacity: 1; background: rgba(255,255,255,.1); } }
+.dev-toggle { font-size: 14px; }
+.clock { font-size: 12px; opacity: .7; font-variant-numeric: tabular-nums; }
+
+/* Company Picker */
+.company-picker { position: relative; }
+.cp-btn {
+  background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.25); color: #fff;
+  padding: 5px 10px; border-radius: 5px; cursor: pointer; font-size: 12px;
+  display: flex; align-items: center; gap: 6px;
+  &:hover { background: rgba(255,255,255,.22); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,.6); }
+  .arrow { font-size: 9px; }
+}
+.cp-drop {
+  position: absolute; right: 0; top: 38px; background: #fff; color: $c-text;
+  border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.15); min-width: 200px; padding: 4px; z-index: 50;
+}
+.cp-opt {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+  &:hover { background: $c-active-bg; }
+  &.active { background: $c-active-bg; color: $c-active-tx; font-weight: 600; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  small { margin-left: auto; font-size: 11px; color: $c-text-l; }
+  &.group { border-top: 1px dashed $c-border; margin-top: 4px; }
 }
 
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 17px;
-  font-weight: 600;
+/* ── Body ── */
+.body { display: flex; flex: 1; overflow: hidden; }
 
-  .logo {
-    width: 30px;
-    height: 30px;
-    border-radius: 6px;
-    background: #fff;
-    color: #1e4d8b;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 800;
-    font-size: 15px;
-  }
-
-  small {
-    font-weight: 400;
-    opacity: 0.8;
-    font-size: 12px;
-  }
-}
-
-.topbar-right {
-  margin-left: auto;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.watermark {
-  font-size: 12px;
-  background: rgba(255, 255, 255, 0.15);
-  padding: 4px 10px;
-  border-radius: 12px;
-  border: 1px dashed rgba(255, 255, 255, 0.4);
-}
-
-.clock {
-  font-size: 12px;
-  opacity: 0.9;
-}
-
-/* 公司切换器 */
-.company-switcher {
-  position: relative;
-}
-.company-btn {
-  background: rgba(255, 255, 255, 0.16);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  color: #fff;
-  padding: 7px 14px;
-  border-radius: 6px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-
-  &:hover {
-    background: rgba(255, 255, 255, 0.28);
-  }
-  .dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    border: 2px solid rgba(255, 255, 255, 0.7);
-  }
-  .ctx {
-    font-weight: 600;
-  }
-  .perm {
-    font-size: 11px;
-    background: rgba(255, 255, 255, 0.2);
-    padding: 1px 6px;
-    border-radius: 8px;
-  }
-  .arrow {
-    font-size: 10px;
-  }
-}
-.company-menu {
-  position: absolute;
-  right: 0;
-  top: 44px;
-  background: #fff;
-  color: #1f2d3d;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(16, 42, 71, 0.18);
-  min-width: 230px;
-  padding: 6px;
-  z-index: 50;
-
-  .cm-head {
-    font-size: 11px;
-    color: #8a9bb0;
-    padding: 6px 10px;
-  }
-  .cm-opt {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 9px 12px;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 13px;
-
-    &:hover {
-      background: #eef4fb;
-    }
-    &.active {
-      background: #eef4fb;
-      color: #1e4d8b;
-      font-weight: 600;
-    }
-    .dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-      flex-shrink: 0;
-    }
-    .nm {
-      flex: 1;
-    }
-    .pm {
-      font-size: 11px;
-      color: #5a6b7e;
-    }
-    &.group {
-      border-top: 1px dashed #e1e8f0;
-      margin-top: 4px;
-    }
-  }
-}
-
-/* 角色切换器 */
-.role-switcher {
-  position: relative;
-}
-.role-btn {
-  background: rgba(255, 255, 255, 0.16);
-  border: 1px solid rgba(255, 255, 255, 0.3);
-  color: #fff;
-  padding: 7px 14px;
-  border-radius: 6px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 13px;
-
-  &:hover {
-    background: rgba(255, 255, 255, 0.28);
-  }
-
-  .dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    border: 2px solid rgba(255, 255, 255, 0.7);
-  }
-
-  .arrow {
-    font-size: 10px;
-  }
-}
-
-.role-menu {
-  position: absolute;
-  right: 0;
-  top: 44px;
-  background: #fff;
-  color: #1f2d3d;
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(16, 42, 71, 0.18);
-  min-width: 230px;
-  padding: 6px;
-  z-index: 50;
-  max-height: 440px;
-  overflow-y: auto;
-}
-
-.role-opt {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 13px;
-
-  &:hover {
-    background: #eef4fb;
-  }
-
-  &.active {
-    background: #eef4fb;
-    color: #1e4d8b;
-    font-weight: 600;
-  }
-
-  .dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    flex-shrink: 0;
-  }
-
-  .desc {
-    font-size: 11px;
-    color: #5a6b7e;
-    margin-left: auto;
-  }
-}
-
-.body {
-  display: flex;
-  flex: 1;
-  overflow: hidden;
-}
-
+/* ── Sidebar ── */
 .sidebar {
-  width: 188px;
-  background: #102a47;
-  color: #cfdcec;
-  flex-shrink: 0;
-  padding: 14px 0;
-  overflow-y: auto;
-}
-
-.nav-group {
-  padding: 8px 20px 4px;
-  font-size: 11px;
-  color: #7e93ad;
-  letter-spacing: 1px;
-}
-
-.nav-item {
-  padding: 12px 20px;
-  cursor: pointer;
-  font-size: 14px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border-left: 3px solid transparent;
-  transition: 0.15s;
-
-  &:hover {
-    background: rgba(255, 255, 255, 0.06);
-    color: #fff;
-  }
-
-  &.active {
-    background: rgba(255, 255, 255, 0.1);
-    color: #fff;
-    border-left-color: #4ea3ff;
-    font-weight: 600;
-  }
-
-  .ico {
-    width: 18px;
-    text-align: center;
-    opacity: 0.9;
+  width: 200px; background: $c-sidebar; color: #b8c7dd;
+  display: flex; flex-direction: column; flex-shrink: 0; transition: width .2s;
+  &.collapsed { width: 48px;
+    .nav-group-label span:not(.expand-icon), .nav-link span, .sidebar-fold span { display: none; }
   }
 }
-
-.content-wrap {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
+.sidebar-scroll { flex: 1; overflow-y: auto; padding: 8px 0; }
+.sidebar-fold {
+  height: 32px; display: flex; align-items: center; justify-content: center;
+  cursor: pointer; border-top: 1px solid rgba(255,255,255,.06);
+  color: #7e93ad; font-size: 11px;
+  &:hover { color: #fff; background: rgba(255,255,255,.04); }
 }
 
-.sub-tabs {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 16px;
-  height: 46px;
-  background: #fff;
-  border-bottom: 1px solid #e3e9f0;
-  overflow-x: auto;
-  box-shadow: 0 1px 3px rgba(16, 42, 71, 0.05);
+/* Nav Group */
+.nav-group-label {
+  padding: 9px 16px 5px; font-size: 11px; color: #5e7ba0; letter-spacing: 1px; text-transform: uppercase;
+  cursor: pointer; user-select: none; display: flex; align-items: center; gap: 4px;
+  &:hover { color: #a0b8d4; }
+  .expand-icon { font-size: 9px; width: 10px; }
+}
+.nav-group-items { padding: 0 8px; }
+.nav-link {
+  display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 6px;
+  font-size: 13px; color: #b8c7dd; text-decoration: none; transition: .12s;
+  &:hover { background: rgba(255,255,255,.06); color: #fff; }
+  &.active { background: rgba(255,255,255,.1); color: #fff; font-weight: 600; }
+  .nav-icon { font-size: 16px; }
 }
 
-.sub-tab {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 14px;
-  font-size: 13px;
-  color: #5a6b7e;
-  cursor: pointer;
-  border-radius: 6px;
-  white-space: nowrap;
-  border-bottom: 2px solid transparent;
-  transition: 0.15s;
+/* ── Main Content ── */
+.main { flex: 1; overflow-y: auto; padding: 20px 24px; }
 
-  &:hover {
-    background: #eef4fb;
-    color: #1e4d8b;
-  }
-
-  &.active {
-    color: #1e4d8b;
-    font-weight: 600;
-    background: #eef4fb;
-    border-bottom-color: #2a6bb0;
-  }
-
-  .ico {
-    font-size: 14px;
-  }
+/* ── Dev Panel ── */
+.dev-panel {
+  position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+  background: #1a2636; color: #cfdcec; padding: 10px 20px;
+  box-shadow: 0 -4px 12px rgba(0,0,0,.2);
+}
+.dev-title { font-size: 11px; color: #7e93ad; margin-bottom: 6px; }
+.dev-roles { display: flex; gap: 8px; flex-wrap: wrap; }
+.dev-role-btn {
+  background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); color: #cfdcec;
+  padding: 4px 10px; border-radius: 4px; cursor: pointer; font-size: 12px;
+  display: flex; align-items: center; gap: 5px;
+  &:hover { background: rgba(255,255,255,.15); }
+  &.active { background: rgba(74, 163, 255, .25); border-color: rgba(74,163,255,.4); }
+  .dot { width: 7px; height: 7px; border-radius: 50%; }
 }
 
-.content {
-  flex: 1;
-  overflow-y: auto;
-  padding: 18px 22px;
-}
+/* ── Transitions ── */
+.page-fade-enter-active, .page-fade-leave-active { transition: opacity .15s; }
+.page-fade-enter-from, .page-fade-leave-to { opacity: 0; }
+.slide-up-enter-active, .slide-up-leave-active { transition: transform .2s ease; }
+.slide-up-enter-from, .slide-up-leave-to { transform: translateY(100%); }
 </style>

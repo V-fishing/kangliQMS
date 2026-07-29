@@ -23,6 +23,13 @@ export interface NcmTrend30 {
   target: number
 }
 
+/** 趋势分析单点：后端 /analysis/trend 返回，defectRate 为比值(0-1) */
+export interface NcmTrendPoint {
+  period: string
+  count: number
+  defectRate: number
+}
+
 export interface NcmType {
   name: string
   v: number
@@ -38,6 +45,10 @@ export interface NcmCompare {
   cur: number[]
   prev: number[]
   yoy: number[]
+  curLabel?: string
+  prevLabel?: string
+  yoyLabel?: string
+  unit?: string
 }
 
 export interface NcmShift {
@@ -84,6 +95,8 @@ export interface NcmCorrective {
 }
 
 export interface NcmDict {
+  /** 后端主键 id，用于编辑/删除/停用接口 */
+  id?: string
   code: string
   name: string
   cat: string
@@ -105,6 +118,8 @@ export interface NcmEvent {
 /** 8D 报告列表项（对应 HTML MOCKX.ncm.eightD） */
 export interface Ncm8DListItem {
   id: string
+  /** 8D 编号，如 8D-...，仅用于展示 */
+  d8No?: string
   issue: string
   /** 来源：不良记录 / SPC报警 / 客诉 */
   src: string
@@ -132,24 +147,27 @@ export interface NcmCapa {
   createdAt: string
 }
 
-/** 8D 相关 */
+/** 8D 看板数据结构（EightDBoard 组件使用） */
 export interface Ncm8D {
   id: string
   title: string
-  prod: string
+  prod?: string
   sev: Severity
   currentStage: number
+  team?: string
+  source?: string
+  sourceRefId?: string
   stages: {
     name: string
-    status: 'done' | 'current' | 'pending'
+    status?: 'done' | 'current' | 'pending'
     owner?: string
     due?: string
     content?: string
   }[]
   rootCause?: string
   actions?: { desc: string; owner: string; due: string; done: boolean }[]
-  fishbone: { category: string; causes: string[] }[]
-  fiveWhy: { why: string; answer: string }[]
+  fishbone?: { category: string; causes: string[] }[]
+  fiveWhy?: { why: string; answer: string }[]
 }
 
 export interface NcmDefectHeatmap {

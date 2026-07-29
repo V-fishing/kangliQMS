@@ -2,7 +2,7 @@
 import { ref, reactive, computed } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { BANNERS } from '@/config/banners'
 import { asmSatisfactions } from '@/mock/asm'
 import type { AsmSatisfaction } from '@/types/asm'
 
@@ -79,9 +79,7 @@ function linkCapa(row: AsmSatisfaction) {
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>客户满意度记录</h3>
-        <span class="sr-tag">SR-ASM-009</span><span class="sr-tag">SR-ASM-010</span>
-        <span class="sr-tag">SR-ASM-013</span><span class="sr-tag">SR-ASM-014</span>
-      </div>
+        </div>
       <div class="qms-card__body" style="padding: 0">
         <el-table :data="list" border size="small">
           <el-table-column prop="id" label="单号" width="130" />

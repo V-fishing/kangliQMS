@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
+useChartResize(() => [radarInst, pieInst])
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { BANNERS } from '@/config/banners'
 import KpiCard from '@/components/common/KpiCard.vue'
-import { internalAudits, ncFindings, healthDims, qsmKpi } from '@/mock/qsm'
+import { qsmApi } from '@/api'
+import type { InternalAudit, NcFinding, HealthDim, QsmKpi } from '@/types/qsm'
 
 const authStore = useAuthStore()
 const banner = BANNERS.qsm?.[authStore.role] || {
@@ -12,15 +15,25 @@ const banner = BANNERS.qsm?.[authStore.role] || {
   desc: '内审进度、不符合项与体系健康度一屏掌控',
 }
 
-const kpi = qsmKpi
+const kpi = ref<QsmKpi>({
+  auditPlan: 0,
+  auditDoing: 0,
+  ncOpen: 0,
+  ncSevere: 0,
+  healthScore: 0,
+  rectifyRate: 0,
+})
+const audits = ref<InternalAudit[]>([])
+const findings = ref<NcFinding[]>([])
+const healthDims = ref<HealthDim[]>([])
 
 const ncByLevel = computed(() => {
-  const open = ncFindings.filter((n) => n.status !== '已关闭')
+  const open = findings.value.filter((n) => n.status !== '已关闭')
   return ['严重', '一般', '观察项'].map((lv) => ({ name: lv, value: open.filter((n) => n.level === lv).length }))
 })
 
 const auditProgress = computed(() =>
-  internalAudits.map((a) => ({ name: a.planName, status: a.status, score: a.score })),
+  audits.value.map((a) => ({ name: a.planName, status: a.status, score: a.score })),
 )
 
 const radarRef = ref<HTMLDivElement>()
@@ -28,20 +41,50 @@ const pieRef = ref<HTMLDivElement>()
 let radarInst: echarts.ECharts | null = null
 let pieInst: echarts.ECharts | null = null
 
-onMounted(() => {
+async function loadAll() {
+  const [k, a, f, d] = await Promise.all([
+    qsmApi.getKpi(),
+    qsmApi.getAudits(),
+    qsmApi.getNcFindings(),
+    qsmApi.getHealthDims(),
+  ])
+  kpi.value = k
+  audits.value = a
+  findings.value = f
+  healthDims.value = d
+  // 数据到达后刷新图表
+  if (radarInst) {
+    radarInst.setOption({
+      radar: { indicator: healthDims.value.map((dim) => ({ name: dim.name, max: 100 })) },
+      series: [{
+        type: 'radar',
+        data: [
+          { value: healthDims.value.map((dim) => dim.value), name: '当前值', areaStyle: { opacity: 0.2 }, itemStyle: { color: '#1e4d8b' } },
+          { value: healthDims.value.map((dim) => dim.threshold), name: '预警阈值', lineStyle: { type: 'dashed', color: '#c0392b' }, itemStyle: { color: '#c0392b' } },
+        ],
+      }],
+    })
+  }
+  if (pieInst) {
+    pieInst.setOption({ series: [{ data: ncByLevel.value }] })
+  }
+}
+
+onMounted(async () => {
+  await loadAll()
   if (radarRef.value) {
     radarInst = echarts.init(radarRef.value)
     radarInst.setOption({
       tooltip: {},
       radar: {
-        indicator: healthDims.map((d) => ({ name: d.name, max: 100 })),
+        indicator: healthDims.value.map((d) => ({ name: d.name, max: 100 })),
         radius: '65%',
       },
       series: [{
         type: 'radar',
         data: [
-          { value: healthDims.map((d) => d.value), name: '当前值', areaStyle: { opacity: 0.2 }, itemStyle: { color: '#1e4d8b' } },
-          { value: healthDims.map((d) => d.threshold), name: '预警阈值', lineStyle: { type: 'dashed', color: '#c0392b' }, itemStyle: { color: '#c0392b' } },
+          { value: healthDims.value.map((d) => d.value), name: '当前值', areaStyle: { opacity: 0.2 }, itemStyle: { color: '#1e4d8b' } },
+          { value: healthDims.value.map((d) => d.threshold), name: '预警阈值', lineStyle: { type: 'dashed', color: '#c0392b' }, itemStyle: { color: '#c0392b' } },
         ],
       }],
       legend: { bottom: 0, data: ['当前值', '预警阈值'] },
@@ -70,6 +113,7 @@ function pillCls(s: string) { return stMap[s] || 'y' }
 
 <template>
   <div class="qsm-dash">
+    <el-alert type="warning" show-icon :closable="false" title="此模块后端尚未实现，当前为演示数据（@backend-pending）" style="margin-bottom:12px" />
     <div class="qms-banner">
       <div class="qms-banner__icon" :style="{ background: authStore.currentRole?.color }">📈</div>
       <div>
@@ -89,17 +133,17 @@ function pillCls(s: string) { return stMap[s] || 'y' }
 
     <div class="chart-grid chart-grid--2">
       <div class="qms-card">
-        <div class="qms-card__header"><h3>体系健康度雷达</h3><span class="sr-tag">SR-QSM-013</span><span class="sr-tag">SR-QSM-014</span></div>
+        <div class="qms-card__header"><h3>体系健康度雷达</h3></div>
         <div class="qms-card__body"><div ref="radarRef" class="chart-container"></div></div>
       </div>
       <div class="qms-card">
-        <div class="qms-card__header"><h3>未关闭不符合项分级</h3><span class="sr-tag">SR-QSM-009</span></div>
+        <div class="qms-card__header"><h3>未关闭不符合项分级</h3></div>
         <div class="qms-card__body"><div ref="pieRef" class="chart-container"></div></div>
       </div>
     </div>
 
     <div class="qms-card">
-      <div class="qms-card__header"><h3>内审计划进度</h3><span class="sr-tag">SR-QSM-007</span></div>
+      <div class="qms-card__header"><h3>内审计划进度</h3></div>
       <div class="qms-card__body" style="padding: 0">
         <el-table :data="auditProgress" border size="small">
           <el-table-column prop="name" label="内审计划" min-width="220" />

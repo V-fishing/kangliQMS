@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
-import { tools, toolMaints, toolRepairs } from '@/mock/tlm'
+import { BANNERS } from '@/config/banners'
+import { tlmApi } from '@/api'
 import type { Tool, ToolMaint, ToolRepair } from '@/types/tlm'
 
 const authStore = useAuthStore()
@@ -12,9 +12,16 @@ const banner = BANNERS.tlm?.[authStore.role] || {
   desc: '周/月/年保养计划、临期提醒与维修精度验证',
 }
 
-const toolList = ref<Tool[]>(JSON.parse(JSON.stringify(tools)))
-const maints = ref<ToolMaint[]>(JSON.parse(JSON.stringify(toolMaints)))
-const repairs = ref<ToolRepair[]>(JSON.parse(JSON.stringify(toolRepairs)))
+const toolList = ref<Tool[]>([])
+const maints = ref<ToolMaint[]>([])
+const repairs = ref<ToolRepair[]>([])
+
+onMounted(async () => {
+  const [t, m, r] = await Promise.all([tlmApi.getTools(), tlmApi.getMaints(), tlmApi.getRepairs()])
+  toolList.value = t
+  maints.value = m
+  repairs.value = r
+})
 
 const today = new Date('2025-01-25')
 function daysTo(d: string) {
@@ -95,7 +102,7 @@ function verifyPrecision(r: ToolRepair) {
     </div>
 
     <div class="qms-card">
-      <div class="qms-card__header"><h3>临期保养提醒（7天内）</h3><span class="sr-tag">SR-TLM-008</span><span class="sr-tag">SR-TLM-009</span></div>
+      <div class="qms-card__header"><h3>临期保养提醒（7天内）</h3></div>
       <div class="qms-card__body" style="padding: 0">
         <el-table :data="maintDue" border size="small">
           <el-table-column prop="code" label="一物一码" width="130" />
@@ -116,7 +123,7 @@ function verifyPrecision(r: ToolRepair) {
 
     <div class="chart-grid chart-grid--2">
       <div class="qms-card">
-        <div class="qms-card__header"><h3>保养记录</h3><span class="sr-tag">SR-TLM-010</span></div>
+        <div class="qms-card__header"><h3>保养记录</h3></div>
         <div class="qms-card__body" style="padding: 0">
           <el-table :data="maints" border size="small">
             <el-table-column prop="id" label="编号" width="80" />
@@ -131,7 +138,7 @@ function verifyPrecision(r: ToolRepair) {
         </div>
       </div>
       <div class="qms-card">
-        <div class="qms-card__header"><h3>维修与精度验证</h3><span class="sr-tag">SR-TLM-015</span><span class="sr-tag">SR-TLM-016</span></div>
+        <div class="qms-card__header"><h3>维修与精度验证</h3></div>
         <div class="qms-card__body" style="padding: 0">
           <el-table :data="repairs" border size="small">
             <el-table-column label="工装" min-width="110"><template #default="{ row }">{{ toolName(row.toolId) }}</template></el-table-column>

@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
+useChartResize(() => [inst])
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { BANNERS } from '@/config/banners'
+import { ncmApi } from '@/api'
+import type { NcmCompare } from '@/types/ncm'
 
 const authStore = useAuthStore()
 const banner = BANNERS.ncm?.[authStore.role] || {
@@ -13,41 +16,83 @@ const banner = BANNERS.ncm?.[authStore.role] || {
 
 // ---- 对比模式（对齐 HTML renderNcmCompare 的 seg 控件） ----
 const modes = ['周环比', '月环比', '月同比', '年同比', 'MTD月至今'] as const
-const mode = ref<typeof modes[number]>('周环比')
+const mode = ref<typeof modes[number]>('月环比')
+// 模式 -> 后端对比口径 type
+const modeType: Record<typeof modes[number], string> = {
+  周环比: 'week',
+  月环比: 'month',
+  月同比: 'month',
+  年同比: 'year',
+  'MTD月至今': 'mtd',
+}
+
+// ---- 异步加载：按当前模式向真实接口请求不良率% ----
+const compare = ref<NcmCompare>({ labels: [], cur: [], prev: [], yoy: [] })
+async function load() {
+  try {
+    compare.value = await ncmApi.getCompare(undefined, modeType[mode.value])
+  } catch (e) {
+    // 错误已由拦截器提示
+  }
+}
 function setCmp(name: typeof modes[number]) {
+  if (mode.value === name) return
   mode.value = name
-  ElMessage({ message: `${name}视图（演示）`, duration: 1200 })
+  load()
 }
 
-// ---- 数据（对齐 HTML MOCK.ncm.compare 与 g-3 三个 KV 面板） ----
-const compare = {
-  labels: ['第一周', '第二周', '第三周', '第四周'],
-  cur: [1.6, 1.9, 2.1, 1.82],
-  prev: [1.7, 1.8, 1.6, 1.5],
-  yoy: [2.1, 2.0, 1.9, 1.8],
-}
-const kvCards = [
-  { title: '周环比', rows: [['本周', '1.82%'], ['上周', '1.50%']], change: { txt: '↑ +21.3% ↑', up: true } },
-  { title: '月同比', rows: [['本月', '1.82%'], ['去年同月', '2.10%']], change: { txt: '↓ -13.3% ↓', up: false } },
-  {
-    title: 'MTD对比',
-    rows: [['本月截止', '1.82%'], ['上月同期', '1.55%'], ['去年同期', '2.05%']],
-    change: null,
-  },
-] as const
+onMounted(load)
 
-// ---- 图表 option（对齐 HTML compareOption） ----
+// ---- KV 面板：从 compare 数据派生（无数据时显示 --） ----
+const kvCards = computed(() => {
+  const c = compare.value
+  const unit = c.unit || '%'
+  const curLabel = c.curLabel || '当前'
+  const prevLabel = c.prevLabel || '上一期'
+  const yoyLabel = c.yoyLabel || '去年同期'
+  const cur = c.cur
+  const prev = c.prev
+  const yoy = c.yoy
+  const curLast = cur.length ? cur[cur.length - 1] : 0
+  const prevLast = prev.length ? prev[prev.length - 1] : 0
+  const yoyLast = yoy.length ? yoy[yoy.length - 1] : 0
+  const momChange = prevLast > 0 ? +(((curLast - prevLast) / prevLast) * 100).toFixed(1) : null
+  const yoyChange = yoyLast > 0 ? +(((curLast - yoyLast) / yoyLast) * 100).toFixed(1) : null
+  const fmtChange = (v: number | null) =>
+    v == null ? null : { txt: `${v > 0 ? '↑' : '↓'} ${Math.abs(v)}%`, up: v > 0 }
+  return [
+    {
+      title: `${curLabel} 不良率`,
+      rows: [[curLabel, `${curLast}${unit}`]],
+      change: null,
+    },
+    {
+      title: `环比 · ${curLabel} vs ${prevLabel}`,
+      rows: [[curLabel, `${curLast}${unit}`], [prevLabel, `${prevLast}${unit}`]],
+      change: fmtChange(momChange),
+    },
+    {
+      title: `同比 · ${curLabel} vs ${yoyLabel}`,
+      rows: [[curLabel, `${curLast}${unit}`], [yoyLabel, `${yoyLast}${unit}`]],
+      change: fmtChange(yoyChange),
+    },
+  ]
+})
+
+// ---- 图表 option ----
 function compareOption() {
+  const c = compare.value
+  const labels = [c.curLabel || '当前', c.prevLabel || '上一期', c.yoyLabel || '去年同期']
   return {
-    tooltip: { trigger: 'axis' },
-    legend: { data: ['本月', '上月', '去年同月'], bottom: 0, textStyle: { fontSize: 11 } },
+    tooltip: { trigger: 'axis', valueFormatter: (v: number) => `${v}${c.unit || '%'}` },
+    legend: { data: labels, bottom: 0, textStyle: { fontSize: 11 } },
     grid: { left: 42, right: 18, top: 24, bottom: 40 },
-    xAxis: { type: 'category', data: compare.labels, axisLabel: { fontSize: 11 } },
-    yAxis: { type: 'value', name: '不良率%', axisLabel: { fontSize: 10 } },
+    xAxis: { type: 'category', data: c.labels.length ? c.labels : ['不良率'], axisLabel: { fontSize: 11 } },
+    yAxis: { type: 'value', name: `不良率${c.unit || '%'}`, axisLabel: { fontSize: 10 } },
     series: [
-      { name: '本月', type: 'bar', data: compare.cur, barWidth: '20%', itemStyle: { color: '#1e4d8b', borderRadius: [3, 3, 0, 0] } },
-      { name: '上月', type: 'bar', data: compare.prev, barWidth: '20%', itemStyle: { color: '#5b8def', borderRadius: [3, 3, 0, 0] } },
-      { name: '去年同月', type: 'bar', data: compare.yoy, barWidth: '20%', itemStyle: { color: '#a0c4f0', borderRadius: [3, 3, 0, 0] } },
+      { name: labels[0], type: 'bar', data: c.cur, barWidth: '20%', itemStyle: { color: '#1e4d8b', borderRadius: [3, 3, 0, 0] } },
+      { name: labels[1], type: 'bar', data: c.prev, barWidth: '20%', itemStyle: { color: '#5b8def', borderRadius: [3, 3, 0, 0] } },
+      { name: labels[2], type: 'bar', data: c.yoy, barWidth: '20%', itemStyle: { color: '#a0c4f0', borderRadius: [3, 3, 0, 0] } },
     ],
   }
 }
@@ -60,7 +105,11 @@ function init() {
     inst.setOption(compareOption())
   }
 }
+function refresh() {
+  inst?.setOption(compareOption())
+}
 onMounted(() => { init(); window.addEventListener('resize', () => inst?.resize()) })
+watch(compare, refresh, { deep: true })
 onBeforeUnmount(() => inst?.dispose())
 </script>
 
@@ -85,11 +134,7 @@ onBeforeUnmount(() => inst?.dispose())
       <div class="qms-card__header">
         <h3>{{ mode }}对比</h3>
         <span class="tag">工作日归一化</span>
-        <span class="sr-tag">SR-NCM-018</span>
-        <span class="sr-tag">SR-NCM-019</span>
-        <span class="sr-tag">SR-NCM-020</span>
-        <span class="sr-tag">SR-NCM-021</span>
-      </div>
+        </div>
       <div class="qms-card__body">
         <div ref="chartRef" class="chart-container lg"></div>
       </div>

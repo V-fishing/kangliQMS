@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { useCompanyStore } from '@/stores/company'
+import { BANNERS } from '@/config/banners'
 import ScanInput from '@/components/common/ScanInput.vue'
-import { spcParams, spcCollectTasks, spcImportHistory } from '@/mock/spc'
-import type { SpcCollectTask, SpcImportRecord } from '@/types/spc'
+import { spcApi } from '@/api'
+import type { SpcCollectTask, SpcImportRecord, SpcParam } from '@/types/spc'
 
 const authStore = useAuthStore()
 const banner = BANNERS.spc?.[authStore.role] || {
@@ -13,8 +14,19 @@ const banner = BANNERS.spc?.[authStore.role] || {
   desc: '现场数据采集、扫码录入与批量导入',
 }
 
+// 参数列表（后端 /spc/params）与采集任务（/spc/collect-tasks）、导入历史（无后端接口，初始空）
+const spcParams = ref<(SpcParam & { id: string })[]>([])
+onMounted(async () => {
+  spcParams.value = await spcApi.getParams()
+  collectTasks.value = await spcApi.getCollectTasks()
+  importHistory.value = await spcApi.getImportHistory()
+  await loadMyRecords()
+  if (paramOptions.value.length) entry.param = paramOptions.value[0]
+  importParam.value = paramOptions.value[0]
+})
+
 // 参数下拉： "注塑压力(MPa)" 形式
-const paramOptions = computed(() => spcParams.map((p) => `${p.p}(${p.unit})`))
+const paramOptions = computed(() => spcParams.value.map((p) => `${p.p}(${p.unit})`))
 function paramName(v: string) { return v.replace(/\(.*\)/, '') }
 function esc(s: string) { return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]!)) }
 
@@ -28,30 +40,95 @@ const fileInput = ref<HTMLInputElement>()
 const tplType = ref<'csv' | 'excel' | 'json'>('csv')
 
 // 采集任务
-const collectTasks = ref<SpcCollectTask[]>([...spcCollectTasks])
+const collectTasks = ref<SpcCollectTask[]>([])
 
-// 我的采集记录（对齐 HTML 硬编码表）
-const myRecords = ref([
-  { time: '10:20', par: '注塑压力', xbar: 128.9, r: 2.4, judge: '合格' },
-  { time: '10:05', par: '注塑压力', xbar: 132.5, r: 3.8, judge: '不合格' },
-  { time: '09:50', par: '注塑压力', xbar: 129.1, r: 2.1, judge: '合格' },
-])
+// 我的采集记录：真实后端 /v1/spc/subgroups（按 paramId 映射参数名）
+interface RecRow { time: string; par: string; xbar: number; r: number; source: string; status: '正常' | '异常' }
+const allRecords = ref<RecRow[]>([])
+// 分类筛选：按参数 + 按判定状态（正常/异常，与表格「判定」列同一字段）
+const recParam = ref('全部')
+const recJudge = ref<'all' | 'normal' | 'abnormal'>('all')
+const recParamOptions = computed(() => ['全部', ...spcParams.value.map((p) => p.p)])
+const recCounts = computed(() => ({
+  total: allRecords.value.length,
+  normal: allRecords.value.filter((r) => r.status === '正常').length,
+  abnormal: allRecords.value.filter((r) => r.status === '异常').length,
+}))
+const myRecords = computed(() =>
+  allRecords.value.filter((r) => {
+    if (recParam.value !== '全部' && r.par !== recParam.value) return false
+    if (recJudge.value === 'normal' && r.status !== '正常') return false
+    if (recJudge.value === 'abnormal' && r.status !== '异常') return false
+    return true
+  }),
+)
+async function loadMyRecords() {
+  const list = await spcApi.getSubgroups()
+  const nameById: Record<string, string> = Object.fromEntries(spcParams.value.map((p) => [p.id, p.p]))
+  // 先按完整时间戳(ISO, 含日期)倒序再截取,避免仅按 HH:MM 排序导致
+  // 新提交记录被历史"晚时刻"数据挤出前 50 条,表现为"提交后列表没更新"。
+  allRecords.value = [...list]
+    .sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')))
+    .slice(0, 50)
+    .map((s) => {
+      return {
+        time: (s.time || '').includes('T') ? (s.time as string).slice(11, 16) : (s.time || '').slice(0, 5),
+        par: nameById[s.paramId as string] || s.paramId || '-',
+        xbar: +(+s.xbar).toFixed(1),
+        r: +(+s.r).toFixed(1),
+        source: s.dataSource === 'fia' ? '首件联动' : '正常采集',
+        status: (s.judge as string) || (s.outlierRule ? '异常' : '正常'),
+      }
+    })
+}
 
 // ====== 数据完整性校验（SR-SPC-003）：预定采集点未录入 → 标记"缺失"并告警班组长；停产不告警 ======
-const nowRef = ref('10:55') // 演示用当前时钟（模拟已越过多个采集时点）
-function toMin(t: string) { const [h, m] = t.split(':').map(Number); return h * 60 + m }
 const stopped = reactive<Record<string, boolean>>({})
-const missingTasks = computed(() =>
-  collectTasks.value.filter((t) => t.st === '待采集' && t.due !== '-' && !stopped[t.par] && toMin(t.due) < toMin(nowRef.value)),
-)
+// 缺失任务:后端已标记 st='缺失'(已真实告警班组长)
+const missingTasks = computed(() => collectTasks.value.filter((t) => t.st === '缺失'))
 const missingCount = computed(() => missingTasks.value.length)
-function toggleStop(par: string) {
+// 同步停产标记到后端(SR-SPC-003:停产期间不告警)
+async function toggleStop(par: string) {
+  const t = collectTasks.value.find((x) => x.par === par)
+  if (!t?.id) { ElMessage.warning('采集任务 ID 缺失,无法标记停产'); return }
   stopped[par] = !stopped[par]
-  ElMessage.info(stopped[par] ? `${par} 已标记停产，采集缺失不再告警` : `${par} 已取消停产标记`)
+  try {
+    await spcApi.markDowntime(t.id, stopped[par], stopped[par] ? '计划停产' : '')
+    ElMessage.info(stopped[par] ? `${par} 已标记停产,采集缺失不再告警` : `${par} 已取消停产标记`)
+  } catch (e: any) {
+    stopped[par] = !stopped[par] // 回滚本地状态
+    ElMessage.error(e?.msg || e?.message || '停产标记失败')
+  }
 }
 function fillMissing(par: string) {
-  entry.param = `${par}(${spcParams.find((p) => p.p === par)?.unit})`
+  entry.param = `${par}(${spcParams.value.find((p) => p.p === par)?.unit})`
   ElMessage.info(`请补录 ${par} 的测量值后提交`)
+}
+// 手动标记单条采集缺失 -> 后端 status='缺失' + 告警班组长(停产任务后端会拒绝并提示)
+async function markMissingNow(t: SpcCollectTask) {
+  try {
+    await spcApi.markMissing(t.id, '手动标记:采集到期未录入')
+    t.st = '缺失'
+    ElMessage.warning(`已标记 ${t.par} 采集缺失,班组长已收到告警`)
+  } catch (e: any) {
+    ElMessage.error(e?.msg || e?.message || '标记失败')
+  }
+}
+// 手动触发到期未录入扫描(定时任务每 60s 自动执行,此按钮便于即时验证)
+async function scanMissingNow() {
+  try {
+    const n = await spcApi.scanMissing()
+    await load()
+    ElMessage.info(n > 0 ? `扫描完成,新标记 ${n} 条采集缺失` : '扫描完成,无新增缺失')
+  } catch (e: any) {
+    ElMessage.error(e?.msg || e?.message || '扫描失败')
+  }
+}
+function currentShift(): '早班' | '中班' | '晚班' {
+  const h = new Date().getHours()
+  if (h >= 8 && h < 16) return '早班'
+  if (h >= 16 && h < 24) return '中班'
+  return '晚班'
 }
 
 // ====== 子组基线充分性（SR-SPC-007 / SR-PTL-001）：子组数 < 25 → 标注"数据不足，结果仅供参考" ======
@@ -65,20 +142,36 @@ const baseline = computed(() => {
 
 
 // 手动录入表单
-const entry = reactive({ proc: '注塑', param: paramOptions.value[0], vals: ['128.5', '129.1', '127.8', '130.2', '128.9'] })
-function submitEntry() {
+const entry = reactive({ proc: '注塑', param: '', vals: ['128.5', '129.1', '127.8', '130.2', '128.9'] })
+const submitting = ref(false)
+async function submitEntry() {
   const nums = entry.vals.map(Number).filter((v) => !isNaN(v))
   if (!nums.length) { ElMessage.warning('请录入参数值'); return }
+  const name = paramName(entry.param)
+  const param = spcParams.value.find((p) => p.p === name)
+  if (!param?.id) { ElMessage.warning('未找到对应 SPC 参数，无法提交'); return }
   const xbar = nums.reduce((a, b) => a + b, 0) / nums.length
   const r = Math.max(...nums) - Math.min(...nums)
-  const name = paramName(entry.param)
-  myRecords.value.unshift({ time: new Date().toTimeString().slice(0, 5), par: name, xbar: +xbar.toFixed(1), r: +r.toFixed(1), judge: '合格' })
-  const tk = collectTasks.value.find((t) => t.par === name)
-  if (tk) tk.st = '已完成'
-  if (subgroupCounts[name] != null) subgroupCounts[name] += 1
-  else subgroupCounts[name] = 1
-  ElMessage.success('采集已提交，控制图已刷新')
-  entry.vals = ['', '', '', '', '']
+  submitting.value = true
+  try {
+    await spcApi.createSubgroup({
+      paramId: param.id,
+      orgId: useCompanyStore().currentOrgId || '',
+      subgroupTime: new Date().toISOString(),
+      shift: currentShift(),
+      values: nums,
+    })
+    await loadMyRecords()
+    const tk = collectTasks.value.find((t) => t.par === name)
+    if (tk) tk.st = '已完成'
+    subgroupCounts[name] = (subgroupCounts[name] ?? 0) + 1
+    ElMessage.success('采集已提交，控制图已刷新')
+    entry.vals = ['', '', '', '', '']
+  } catch (e: any) {
+    ElMessage.error(e?.msg || e?.message || '采集提交失败')
+  } finally {
+    submitting.value = false
+  }
 }
 
 // 文件导入：子模式
@@ -92,10 +185,10 @@ const importSubs = [
 type ImportSub = (typeof importSubs)[number]['key']
 const importSub = ref<ImportSub>('file')
 const currentSubLabel = computed(() => importSubs.find((s) => s.key === importSub.value)?.label || '')
-const importParam = ref(paramOptions.value[0])
+const importParam = ref('')
 
-// 导入历史
-const importHistory = ref<SpcImportRecord[]>([...spcImportHistory])
+// 导入历史（后端无单接口，初始空，前端临时缓存）
+const importHistory = ref<SpcImportRecord[]>([])
 function pillClass(s: SpcImportRecord['status']) { return s === '成功' ? 'g' : s === '部分成功' ? 'y' : 'r' }
 function addImportRecord(fileName: string, paramName: string, records: number, status: SpcImportRecord['status'], size: string) {
   importHistory.value.unshift({
@@ -282,6 +375,7 @@ function scanImportFromScan() {
         <div class="qms-card">
           <div class="qms-card__header">
             <h3>采集任务列表</h3>
+            <el-button size="small" type="warning" plain @click="scanMissingNow" style="margin-left: auto">🔍 扫描缺失</el-button>
             <span class="tag">一期人工录入</span>
           </div>
           <div class="qms-card__body">
@@ -300,6 +394,7 @@ function scanImportFromScan() {
                 </template>
                 <template v-else>
                   <el-checkbox v-model="stopped[t.par]" @change="toggleStop(t.par)" title="标记停产后该采集点不触发缺失告警">停产</el-checkbox>
+                  <el-button size="small" type="warning" plain @click="markMissingNow(t)" title="手动标记采集缺失并告警班组长">标记缺失</el-button>
                   <el-button type="primary" size="small" @click="entry.param = `${t.par}(${spcParams.find(p => p.p === t.par)?.unit})`; mode = 'manual'">录入</el-button>
                 </template>
               </div>
@@ -332,21 +427,35 @@ function scanImportFromScan() {
               </div>
             </div>
             <div class="note">系统自动记录录入时间、操作员、子组信息；异常值(如负数尺寸)弹出确认。</div>
-            <el-button type="primary" size="small" @click="submitEntry">提交</el-button>
+            <el-button type="primary" size="small" :loading="submitting" @click="submitEntry">提交</el-button>
           </div>
         </div>
       </div>
 
       <div class="qms-card">
-        <div class="qms-card__header"><h3>我的采集记录</h3><span class="tag">今日</span></div>
+        <div class="qms-card__header">
+          <h3>我的采集记录</h3>
+          <span class="tag">{{ recCounts.total }} 条</span>
+          <div class="rec-filters">
+            <el-select v-model="recParam" size="small" style="width: 140px">
+              <el-option v-for="o in recParamOptions" :key="o" :label="o" :value="o" />
+            </el-select>
+            <div class="seg sm">
+              <el-button :type="recJudge === 'all' ? 'primary' : 'default'" size="small" @click="recJudge = 'all'">全部 {{ recCounts.total }}</el-button>
+              <el-button :type="recJudge === 'normal' ? 'primary' : 'default'" size="small" @click="recJudge = 'normal'">正常 {{ recCounts.normal }}</el-button>
+              <el-button :type="recJudge === 'abnormal' ? 'primary' : 'default'" size="small" @click="recJudge = 'abnormal'">异常 {{ recCounts.abnormal }}</el-button>
+            </div>
+          </div>
+        </div>
         <div class="qms-card__body" style="padding: 0">
           <el-table :data="myRecords" border size="small">
             <el-table-column prop="time" label="时间" width="80" />
             <el-table-column prop="par" label="参数" width="100" />
+            <el-table-column prop="source" label="来源" width="90" />
             <el-table-column prop="xbar" label="Xbar" width="80" />
             <el-table-column prop="r" label="R" width="80" />
             <el-table-column label="判定" width="90">
-              <template #default="{ row }"><span class="qms-pill" :class="row.judge === '合格' ? 'g' : 'r'">{{ row.judge }}</span></template>
+              <template #default="{ row }"><span class="qms-pill" :class="row.status === '正常' ? 'g' : 'r'">{{ row.status }}</span></template>
             </el-table-column>
           </el-table>
         </div>
@@ -503,6 +612,8 @@ function scanImportFromScan() {
 .toolbar { display: flex; align-items: center; gap: 8px; }
 .toolbar .lbl { font-weight: 600; }
 .subseg { margin-bottom: 14px; }
+.rec-filters { margin-left: auto; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.seg.sm .el-button { padding: 5px 10px; }
 .form-grid { display: flex; flex-direction: column; gap: 14px; }
 .form-row { display: flex; align-items: flex-start; gap: 10px; }
 .form-row > label { width: 110px; flex-shrink: 0; padding-top: 6px; font-size: 13px; color: #1f2d3d; }

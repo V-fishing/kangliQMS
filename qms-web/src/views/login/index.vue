@@ -3,7 +3,6 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { findDemoAccount, DEMO_ACCOUNTS } from '@/mock/company'
 
 const authStore = useAuthStore()
 const router = useRouter()
@@ -19,25 +18,22 @@ function fillDemo(acc: string, pwd: string) {
   error.value = ''
 }
 
-function onSubmit() {
+async function onSubmit() {
   error.value = ''
   if (!account.value.trim() || !password.value) {
     error.value = '请输入账号和密码'
     return
   }
-  const acc = findDemoAccount(account.value)
-  if (!acc) {
-    error.value = '账号不存在，可用下方演示账号'
-    return
-  }
-  if (acc.password !== password.value) {
-    error.value = '密码错误（演示密码：123456）'
-    return
-  }
   loading.value = true
-  authStore.loginWithAccount(acc)
-  ElMessage.success(`欢迎，${acc.name}`)
-  router.replace('/company-select')
+  try {
+    await authStore.login(account.value.trim(), password.value)
+    ElMessage.success('登录成功')
+    router.replace('/company-select')
+  } catch (e: any) {
+    error.value = e?.message || '登录失败，请检查账号或密码'
+  } finally {
+    loading.value = false
+  }
 }
 </script>
 
@@ -73,20 +69,26 @@ function onSubmit() {
         <div class="demo-head">演示账号（点击填充）</div>
         <div class="demo-list">
           <button
-            v-for="d in DEMO_ACCOUNTS"
-            :key="d.account"
             class="demo-item"
             type="button"
-            @click="fillDemo(d.account, d.password)"
+            @click="fillDemo('admin', '123456')"
           >
-            <span class="da">{{ d.account }}</span>
-            <span class="dn">{{ d.name }} · {{ d.isGroupAdmin ? '集团管理员' : '单公司' }}</span>
+            <span class="da">admin</span>
+            <span class="dn">集团管理员 · 全公司</span>
+          </button>
+          <button
+            class="demo-item"
+            type="button"
+            @click="fillDemo('mz.insp', '123456')"
+          >
+            <span class="da">mz.insp</span>
+            <span class="dn">梅州检验员 · 单公司</span>
           </button>
         </div>
-        <p class="demo-tip">密码统一 123456；集团管理员 admin 可选“集团总览”，单公司账号仅能进入其所属公司。</p>
+        <p class=”demo-tip”>演示账号：admin / mz.insp / sz.sqe / sz.insp，密码统一 123456</p>
       </div>
     </div>
-    <div class="hint">仅前端演示数据 · 多分公司数据隔离流程</div>
+    <div class="hint">已对接后端认证 · 账号密码校验走真实接口</div>
   </div>
 </template>
 

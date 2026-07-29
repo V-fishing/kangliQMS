@@ -1,10 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
+useChartResize(() => [pieInst, barInst])
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { BANNERS } from '@/config/banners'
 import KpiCard from '@/components/common/KpiCard.vue'
-import { tools } from '@/mock/tlm'
+import { tlmApi } from '@/api'
+import type { Tool } from '@/types/tlm'
 
 const authStore = useAuthStore()
 const banner = BANNERS.tlm?.[authStore.role] || {
@@ -12,23 +15,27 @@ const banner = BANNERS.tlm?.[authStore.role] || {
   desc: '工装全生命周期、寿命预警与保养状态一屏掌控',
 }
 
+const tools = ref<Tool[]>([])
+
+onMounted(async () => (tools.value = await tlmApi.getTools()))
+
 const kpi = computed(() => ({
-  total: tools.length,
-  inUse: tools.filter((t) => t.status === '使用中').length,
-  repairing: tools.filter((t) => t.status === '维修中').length,
-  scrapped: tools.filter((t) => t.status === '报废').length,
-  locked: tools.filter((t) => t.lock === '锁定').length,
-  nearLife: tools.filter((t) => t.status !== '报废' && t.lifeUsed / t.lifeLimit >= 0.9).length,
+  total: tools.value.length,
+  inUse: tools.value.filter((t) => t.status === '使用中').length,
+  repairing: tools.value.filter((t) => t.status === '维修中').length,
+  scrapped: tools.value.filter((t) => t.status === '报废').length,
+  locked: tools.value.filter((t) => t.lock === '锁定').length,
+  nearLife: tools.value.filter((t) => t.status !== '报废' && t.lifeUsed / t.lifeLimit >= 0.9).length,
 }))
 
 const statusDist = computed(() => {
   const order = ['使用中', '维修中', '停用', '报废']
-  return order.map((name) => ({ name, value: tools.filter((t) => t.status === name).length }))
+  return order.map((name) => ({ name, value: tools.value.filter((t) => t.status === name).length }))
 })
 
 // 寿命使用率 TOP
 const lifeRank = computed(() =>
-  [...tools]
+  [...tools.value]
     .filter((t) => t.status !== '报废')
     .map((t) => ({ name: t.name, rate: Number(((t.lifeUsed / t.lifeLimit) * 100).toFixed(1)) }))
     .sort((a, b) => b.rate - a.rate)
@@ -40,9 +47,8 @@ const barRef = ref<HTMLDivElement>()
 let pieInst: echarts.ECharts | null = null
 let barInst: echarts.ECharts | null = null
 
-onMounted(() => {
-  if (pieRef.value) {
-    pieInst = echarts.init(pieRef.value)
+function renderCharts() {
+  if (pieInst) {
     pieInst.setOption({
       tooltip: { trigger: 'item' },
       legend: { bottom: 0 },
@@ -55,8 +61,7 @@ onMounted(() => {
       }],
     })
   }
-  if (barRef.value) {
-    barInst = echarts.init(barRef.value)
+  if (barInst) {
     barInst.setOption({
       tooltip: { trigger: 'axis', formatter: '{b}: {c}%' },
       grid: { left: 120, right: 30, top: 20, bottom: 20 },
@@ -72,12 +77,34 @@ onMounted(() => {
       }],
     })
   }
+}
+
+watch(lifeRank, () => renderCharts(), { deep: true })
+
+onMounted(() => {
+  if (pieRef.value) {
+    pieInst = echarts.init(pieRef.value)
+  }
+  if (barRef.value) {
+    barInst = echarts.init(barRef.value)
+  }
+  renderCharts()
+  window.addEventListener('resize', resize)
 })
-onBeforeUnmount(() => { pieInst?.dispose(); barInst?.dispose() })
+function resize() {
+  pieInst?.resize()
+  barInst?.resize()
+}
+onBeforeUnmount(() => {
+  pieInst?.dispose()
+  barInst?.dispose()
+  window.removeEventListener('resize', resize)
+})
 </script>
 
 <template>
   <div class="tlm-dash">
+    <el-alert type="warning" show-icon :closable="false" title="此模块后端尚未实现，当前为演示数据（@backend-pending）" style="margin-bottom:12px" />
     <div class="qms-banner">
       <div class="qms-banner__icon" :style="{ background: authStore.currentRole?.color }">🔧</div>
       <div>
@@ -97,11 +124,11 @@ onBeforeUnmount(() => { pieInst?.dispose(); barInst?.dispose() })
 
     <div class="chart-grid chart-grid--2">
       <div class="qms-card">
-        <div class="qms-card__header"><h3>工装状态分布</h3><span class="sr-tag">SR-TLM-001</span></div>
+        <div class="qms-card__header"><h3>工装状态分布</h3></div>
         <div class="qms-card__body"><div ref="pieRef" class="chart-container"></div></div>
       </div>
       <div class="qms-card">
-        <div class="qms-card__header"><h3>寿命使用率 TOP6</h3><span class="sr-tag">SR-TLM-012</span></div>
+        <div class="qms-card__header"><h3>寿命使用率 TOP6</h3></div>
         <div class="qms-card__body"><div ref="barRef" class="chart-container"></div></div>
       </div>
     </div>

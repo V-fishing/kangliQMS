@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted, onBeforeUnmount } from 'vue'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
 import type { SpcSubgroup, SpcLimit } from '@/types/spc'
 
 interface RuleDef {
@@ -27,12 +28,15 @@ const emit = defineEmits<{
 
 const chartRef = ref<HTMLDivElement>()
 let inst: echarts.ECharts | null = null
+useChartResize(() => [inst])
 
 const RULE_COLOR = (ruleCode?: string): string => {
   if (!ruleCode) return '#1e4d8b'
   const r = props.rules.find((x) => x.code === ruleCode)
   return r?.level === '报警' ? '#c0392b' : r?.level === '预警' ? '#d4a017' : '#1e4d8b'
 }
+/** 首件联动(fia) 子组的标记色 */
+const FIA_COLOR = '#8e44ad'
 
 const SHIFT_SYMBOL = (shift?: string): string => {
   if (!shift) return 'circle'
@@ -43,16 +47,25 @@ function buildOption() {
   const data = props.subgroups
   const limit = props.limit
 
+  /** 首个首件联动(fia) 子组索引，用于打「首件基准」标记 */
+  const firstFiaIdx = data.findIndex((s) => s.dataSource === 'fia')
+
   const xbarSeries: Record<string, unknown> = {
     name: props.chartType === 'I-MR' ? '单值(I)' : 'Xbar',
     type: 'line',
     data: data.map((s) => s.xbar),
-    symbolSize: 8,
+    symbolSize: 9,
     itemStyle: {
-      color: (p: { dataIndex: number }) => RULE_COLOR(data[p.dataIndex].outlierRule),
+      color: (p: { dataIndex: number }) => {
+        const s = data[p.dataIndex]
+        return s?.dataSource === 'fia' ? FIA_COLOR : RULE_COLOR(s?.outlierRule)
+      },
     },
-    symbol: (value: unknown, params: { dataIndex: number }) =>
-      props.shiftColor ? SHIFT_SYMBOL(data[params.dataIndex].shift) : 'circle',
+    symbol: (value: unknown, params: { dataIndex: number }) => {
+      const s = data[params.dataIndex]
+      if (s?.dataSource === 'fia') return 'diamond'
+      return props.shiftColor ? SHIFT_SYMBOL(s?.shift) : 'circle'
+    },
     markLine: {
       data: [
         { yAxis: limit.ucl, lineStyle: { color: '#c0392b', type: 'dashed' }, label: { formatter: 'UCL' } },
@@ -60,6 +73,16 @@ function buildOption() {
         { yAxis: limit.lcl, lineStyle: { color: '#c0392b', type: 'dashed' }, label: { formatter: 'LCL' } },
       ],
     },
+    markPoint:
+      firstFiaIdx >= 0
+        ? {
+            symbol: 'pin',
+            symbolSize: 48,
+            label: { formatter: '首件基准', color: '#fff', fontSize: 10 },
+            itemStyle: { color: FIA_COLOR },
+            data: [{ coord: [data[firstFiaIdx].no, data[firstFiaIdx].xbar] }],
+          }
+        : undefined,
   }
 
   const rSeries: Record<string, unknown> = {
@@ -89,7 +112,8 @@ function buildOption() {
           Xbar: ${s.xbar.toFixed(4)}<br/>
           R: ${s.r.toFixed(4)}<br/>
           ${s.shift ? `班次: ${s.shift}<br/>` : ''}
-          ${s.outlierRule ? `<span style="color:#c0392b">命中规则: ${s.outlierRule}</span>` : '正常'}`
+          ${s.outlierRule ? `<span style="color:#c0392b">命中规则: ${s.outlierRule}</span>` : '正常'}
+          ${s.dataSource === 'fia' ? `<br/><span style="color:${FIA_COLOR}">🔗 首件联动(fia) · 点击回看首件报告</span>` : ''}`
       },
     },
     legend: { data: [xbarSeries.name, rSeries.name] },

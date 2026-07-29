@@ -1,17 +1,42 @@
+/**
+ * Dynamic route builder — routes are built from GET /api/v1/uop/menus/tree
+ *
+ * Only this single source of truth for business routes. No mock fallback.
+ * Static routes (/login, /company-select, /overview, /404) are in router/index.ts.
+ */
 import type { Router, RouteRecordRaw } from 'vue-router'
 import BasicLayout from '@/layouts/BasicLayout.vue'
-import { useAuthStore } from '@/stores/auth'
-import { getMockMenuTree, type MockMenuItem } from '@/mock/system'
+import { request } from '@/utils/request'
 
-/**
- * 动态路由构建
- * 对应技术栈文档 §6.2: 登录后后端返回 sys_menu 树 -> 前端 router.addRoute 构建路由
- * 当前从 mock 菜单树构建，后端就绪后替换数据源
- */
+/** Backend menu tree node (matches sys_menu table) */
+interface MenuNode {
+  id: string
+  parentId?: string
+  menuCode: string
+  menuName: string
+  menuType: string       // 目录 | 菜单 | 按钮 | 卡片
+  path?: string
+  component?: string
+  icon?: string
+  sortOrder: number
+  visible: boolean
+  children?: MenuNode[]
+}
 
-// 视图懒加载映射
-// 使用相对 glob 路径（相对本文件 src/router/），避免中文/别名路径在生产构建时
-// import.meta.glob 展开出的相对路径解析失败的问题
+/** Frontend route builder representation */
+interface RouteMenu {
+  path: string
+  title: string
+  icon: string
+  module: string
+  name?: string
+  component?: string
+  children?: RouteMenu[]
+  permissions?: string[]
+}
+
+// ── View resolver ──
+
 const viewModules = import.meta.glob('../views/**/*.vue')
 
 function resolveView(path: string) {
@@ -19,64 +44,100 @@ function resolveView(path: string) {
   return viewModules[fullPath] ?? (() => import('../views/error/404.vue'))
 }
 
-function buildRouteFromMenu(menu: MockMenuItem, parentPath: string): RouteRecordRaw {
-  // 根级路由 path 必须以 / 开头（Vue Router 4 要求）
-  const routePath = parentPath ? menu.path : `/${menu.path}`
+// ── Transform: backend MenuNode → frontend RouteMenu ──
+
+function strip(p?: string) {
+  return p?.replace(/^\//, '') || ''
+}
+
+function transformMenu(nodes: MenuNode[], parentModule?: string): RouteMenu[] {
+  return nodes
+    .filter((n) => n.visible !== false)
+    .map((n) => ({
+      path: strip(n.path),
+      title: n.menuName,
+      icon: n.icon || '📄',
+      module: parentModule || n.menuCode,
+      name: n.menuCode,
+      component: n.component || undefined,
+      children: n.children?.length ? transformMenu(n.children, n.menuCode) : undefined,
+      permissions: n.menuCode ? [n.menuCode] : undefined,
+    }))
+}
+
+// ── Build vue-router routes from RouteMenu tree ──
+
+function buildRouteFromMenu(menu: RouteMenu, parentPath: string): RouteRecordRaw {
+  const safePath = menu.path.startsWith('/') ? menu.path : `/${menu.path}`
   const fullPath = parentPath ? `${parentPath}/${menu.path}` : `/${menu.path}`
 
   if (menu.children && menu.children.length > 0) {
     return {
-      path: routePath,
+      path: safePath,
       component: BasicLayout,
       redirect: `${fullPath}/${menu.children[0].path}`,
-      meta: { title: menu.title, icon: menu.icon, module: menu.module, cache: true },
+      meta: {
+        title: menu.title,
+        icon: menu.icon,
+        module: menu.module,
+        permission: menu.permissions?.[0],
+        cache: true,
+      },
       children: menu.children.map((child) => buildRouteFromMenu(child, fullPath)),
     }
   }
 
   return {
-    path: routePath,
+    path: safePath,
     name: menu.name,
     component: resolveView(menu.component || `${menu.module}/${menu.path}`),
     meta: {
       title: menu.title,
       icon: menu.icon,
       module: menu.module,
+      permission: menu.permissions?.[0],
       cache: true,
-      roles: menu.roles,
-      permissions: menu.permissions,
     },
   }
 }
 
-export function buildDynamicRoutes(router: Router) {
-  const authStore = useAuthStore()
-  const menus = getMockMenuTree(authStore.role)
+// ── Public API ──
 
-  for (const menu of menus) {
-    if (menu.children && menu.children.length > 0) {
-      const route = buildRouteFromMenu(menu, '')
-      router.addRoute(route)
-    } else {
-      const route: RouteRecordRaw = {
-        path: `/${menu.path}`,
-        name: menu.name,
-        component: resolveView(menu.component || `${menu.module}/${menu.path}`),
-        meta: {
-          title: menu.title,
-          icon: menu.icon,
-          module: menu.module,
-          cache: true,
-          roles: menu.roles,
-          permissions: menu.permissions,
-        },
+let routesBuilt = false
+
+export async function buildDynamicRoutes(router: Router) {
+  if (routesBuilt) return
+
+  try {
+    const raw = await request.get<MenuNode[]>('/v1/uop/menus/tree')
+    const arr = Array.isArray(raw) ? raw : (Array.isArray((raw as any)?.data) ? (raw as any).data : [])
+
+    if (arr.length > 0) {
+      const menus = transformMenu(arr)
+      routesBuilt = true
+
+      for (const menu of menus) {
+        const p = menu.path.startsWith('/') ? menu.path : `/${menu.path}`
+
+        // Idempotent: skip if already registered
+        if (router.getRoutes().some((r) => r.path === p)) continue
+
+        const route = buildRouteFromMenu(menu, '')
+        router.addRoute(route)
       }
-      // 添加到根 Layout 下
-      router.addRoute('/', {
-        path: menu.path,
-        component: BasicLayout,
-        children: [route],
-      } as RouteRecordRaw)
     }
+  } catch {
+    // Backend unavailable — routes remain as statically registered only
+    console.warn('[router] Failed to load dynamic routes from backend')
+  }
+
+  // Ensure 404 catch-all exists (idempotent)
+  if (!router.hasRoute('NotFound')) {
+    router.addRoute({
+      path: '/:pathMatch(.*)*',
+      name: 'NotFound',
+      component: resolveView('error/404'),
+      meta: { title: '页面不存在', hidden: true },
+    })
   }
 }

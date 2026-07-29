@@ -1,25 +1,57 @@
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { BANNERS } from '@/config/banners'
 import FishboneDiagram from '@/components/workflow/FishboneDiagram.vue'
 import FiveWhyEditor from '@/components/workflow/FiveWhyEditor.vue'
+import D4Wizard from '@/components/workflow/D4Wizard.vue'
 import ApprovalPanel from '@/components/workflow/ApprovalPanel.vue'
-import {
-  ncm8DList as _list, ncm8D, ncm8DTeam, ncm8DForms, ncmCapaList as _capa,
-} from '@/mock/ncm'
-import type { Ncm8DListItem, NcmCapa } from '@/types/ncm'
+import EightDBoard from '@/components/workflow/EightDBoard.vue'
+import { ncmApi } from '@/api'
+import type { Ncm8DListItem, NcmCapa, Ncm8D } from '@/types/ncm'
 
 const authStore = useAuthStore()
+const router = useRouter()
+const route = useRoute()
 const banner = BANNERS.ncm?.[authStore.role] || {
   title: 'NCM · 8D 整改',
   desc: '8D 整改看板、根因分析、SLA 时效与人工手动触发 CAPA',
 }
 
 /* ============ 8D 报告列表 ============ */
-const list = ref<Ncm8DListItem[]>([..._list])
-const capaList = ref<NcmCapa[]>([..._capa])
+const list = ref<Ncm8DListItem[]>([])
+const capaList = ref<NcmCapa[]>([])
+
+const loading = ref(false)
+async function loadList() {
+  loading.value = true
+  try {
+    const [l, capas] = await Promise.all([
+      ncmApi.get8DList(),
+      ncmApi.getCapas().catch(() => [] as NcmCapa[]),
+    ])
+    list.value = l
+    capaList.value = capas
+    if (l.length && !list.value.find((r) => r.id === selectedId.value)) {
+      selectedId.value = l[0].id
+    }
+  } catch (e) {
+    list.value = []
+    capaList.value = []
+  } finally {
+    loading.value = false
+  }
+  // 支持从其他模块（如供应商异常）带 focus=报告Id 跳转并定位
+  const focus = route.query.focus as string | undefined
+  if (focus && list.value.find((r) => r.id === focus)) {
+    selectedId.value = focus
+  }
+  // 列表加载完成后确保默认选中项详情被加载
+  if (selected.value?.id) await loadDetail(selected.value.id)
+}
+onMounted(loadList)
 
 const D8_STAGES = [
   { d: 'D0', name: '前评估', approval: false },
@@ -33,12 +65,151 @@ const D8_STAGES = [
   { d: 'D8', name: '总结关闭', approval: false },
 ]
 
-const selectedId = ref<string>('8D-2026-007')
+const selectedId = ref<string>('')
 const selected = computed(() => list.value.find((r) => r.id === selectedId.value) || list.value[0])
+
+/** 来源展示文本（供应商异常发起的8D） */
+const sourceLabel = computed(() => {
+  const { source, sourceRefId } = detail.value
+  if (!source) return ''
+  if (source === 'SQM异常' || source === '供应商异常') {
+    return `供应商异常上报 (#${sourceRefId || '—'})`
+  }
+  return source
+})
+
+/** 适配 EightDBoard 组件所需的 Ncm8D 结构，真正可视化 D1-D8 流程 */
+const boardStageIdx = ref(0)
+const boardData = computed<Ncm8D | null>(() => {
+  const sel = selected.value
+  if (!sel) return null
+  const stageMeta: Record<string, string> = {
+    D1: '团队组建', D2: '问题描述', D3: '临时措施', D4: '根因分析',
+    D5: '纠正措施', D6: '实施验证', D7: '预防措施', D8: '总结关闭',
+  }
+  const stages = (detail.value.stages || []).map((s) => {
+    const code = String(s.stageCode || '').toUpperCase()
+    const name = stageMeta[code] ? `${code}-${stageMeta[code]}` : String(s.stageCode || '未知阶段')
+    return {
+      name,
+      owner: s.owner || '未指派',
+      due: s.planDate || '—',
+      content: s.content || '（暂无内容）',
+    }
+  })
+  const curCode = String(sel.stage || '').toUpperCase()
+  const curIdx = Object.keys(stageMeta).indexOf(curCode)
+  if (curIdx >= 0) boardStageIdx.value = curIdx
+  const d4 = detail.value.stages.find((s) => s.stageCode === 'D4')?.content || ''
+  const d5 = (detail.value.stages.find((s) => s.stageCode === 'D5')?.content || '')
+    .split('\n').filter(Boolean)
+  return {
+    id: sel.reportId || sel.id,
+    title: detail.value.d8No || sel.ncmNo || sel.id,
+    sev: sel.severity || '—',
+    source: detail.value.source,
+    sourceRefId: detail.value.sourceRefId,
+    team: detail.value.team || sel.team || '—',
+    currentStage: boardStageIdx.value,
+    stages,
+    rootCause: d4,
+    actions: d5.map((desc) => ({ desc, owner: '—', due: '—', done: false })),
+  }
+})
+/** 看板阶段被点击：仅切换可视化查看，不改变后端阶段 */
+function onBoardStage(i: number) {
+  boardStageIdx.value = i
+}
+
+/** 8D 详情（含阶段明细、鱼骨图、5Why） */
+interface StageDetail {
+  stageCode?: string
+  content?: string
+  teamMembers?: string
+  owner?: string
+  planDate?: string
+  approvalStatus?: string
+  approvedBy?: string
+  approvedAt?: string
+  approvalComment?: string
+  evidenceFiles?: string
+}
+const detail = ref<{ stages: StageDetail[]; team: string; source?: string; sourceRefId?: string; d8No?: string }>({
+  stages: [],
+  team: '',
+  source: '',
+  sourceRefId: '',
+  d8No: '',
+})
+
+async function loadDetail(id: string) {
+  if (!id) return
+  try {
+    const vo = await ncmApi.get8DDetail(id)
+    const report = (vo.report ?? {}) as { team?: string; source?: string; sourceRefId?: string; d8No?: string }
+    detail.value = {
+      stages: (vo.stages ?? []).map((s) => ({
+        stageCode: String(s?.stageCode ?? ''),
+        content: String(s?.content ?? ''),
+        teamMembers: String(s?.teamMembers ?? ''),
+        owner: String(s?.owner ?? ''),
+        planDate: s?.planDate != null ? String(s.planDate) : '',
+        approvalStatus: String(s?.approvalStatus ?? ''),
+        approvedBy: String(s?.approvedBy ?? ''),
+        approvedAt: s?.approvedAt != null ? String(s.approvedAt).replace('T', ' ') : '',
+        approvalComment: String(s?.approvalComment ?? ''),
+        evidenceFiles: String(s?.evidenceFiles ?? ''),
+      })),
+      team: String(report.team ?? ''),
+      source: String(report.source ?? ''),
+      sourceRefId: String(report.sourceRefId ?? ''),
+      d8No: String(report.d8No ?? ''),
+    }
+  } catch (e) {
+    detail.value = { stages: [], team: '', source: '', sourceRefId: '', d8No: '' }
+  }
+}
+
+watch(() => selected.value?.id, (id) => { if (id) loadDetail(id) }, { immediate: true })
+
+/** 团队成员列表（从 8D 报告 team 字段或阶段明细聚合） */
+const ncm8DTeam = computed<string[]>(() => {
+  if (detail.value.team) return detail.value.team.split(/[,，、]/).map((s) => s.trim()).filter(Boolean)
+  const set = new Set<string>()
+  for (const s of detail.value.stages) {
+    if (s.teamMembers) s.teamMembers.split(/[,，、]/).forEach((m) => { const t = m.trim(); if (t) set.add(t) })
+  }
+  return Array.from(set)
+})
+
+/** 鱼骨图交互式数据（5M1E 分类），与 FishboneDiagram @update 双向绑定 */
+interface FishboneItem { category: string; causes: string[] }
+const fishboneData = ref<FishboneItem[]>([])
+/** 5Why 追问链，与 FiveWhyEditor @update 双向绑定 */
+interface WhyItem { why: string; answer: string }
+const fiveWhyItems = ref<WhyItem[]>([])
+
+/** 将 D4 阶段 JSON 内容还原为 fishboneData / fiveWhyItems（兼容旧文本格式） */
+function restoreD4Tools(raw: string) {
+  try {
+    const j = JSON.parse(raw)
+    if (j && Array.isArray(j.fishbone)) fishboneData.value = j.fishbone
+    if (j && Array.isArray(j.fiveWhy)) fiveWhyItems.value = j.fiveWhy
+  } catch {
+    fishboneData.value = []
+    fiveWhyItems.value = []
+  }
+}
+/** 将 fishboneData + fiveWhyItems 序列化为 D4 阶段 JSON */
+function serializeD4Tools(): string {
+  return JSON.stringify({ fishbone: fishboneData.value, fiveWhy: fiveWhyItems.value })
+}
+function onFishUpdate(v: FishboneItem[]) { fishboneData.value = v }
+function onWhyUpdate(v: WhyItem[]) { fiveWhyItems.value = v }
 
 /** 从 S=7 解析出数值 */
 function sevNum(sev: string) {
-  const m = sev.match(/\d+/)
+  const m = (sev || '').match(/\d+/)
   return m ? Number(m[0]) : 0
 }
 function sevType(sev: string) {
@@ -57,6 +228,7 @@ const curIndex = computed(() => {
   const i = D8_STAGES.findIndex((s) => s.d === selected.value?.stage)
   return i < 0 ? 0 : i
 })
+const isClosed = computed(() => selected.value?.st === '已闭环')
 function stepClass(i: number) {
   if (i < curIndex.value) return 'done'
   if (i === curIndex.value) return 'cur'
@@ -65,6 +237,11 @@ function stepClass(i: number) {
 
 function selectRow(row: Ncm8DListItem) {
   selectedId.value = row.id
+}
+
+/** 溯源到供应商来料异常单 */
+function goSource(refId: string) {
+  router.push({ name: 'SqmAbnormal', query: { focus: refId } })
 }
 
 /* ============ 手动发起 8D ============ */
@@ -91,19 +268,24 @@ function openCreate8D() {
   new8D.d0 = { scope: '局部', custLevel: '一般', safety: '否', repeat: '否' }
   create8DVisible.value = true
 }
-function confirmCreate8D() {
+async function confirmCreate8D() {
   if (!new8D.issue.trim()) { ElMessage.warning('请填写问题简述'); return }
-  const seq = String(2026007 + list.value.length + 1).slice(-3)
-  const id = `8D-2026-${seq}`
-  const item: Ncm8DListItem = {
-    id, issue: new8D.issue.trim(), src: new8D.src,
-    sev: `S=${new8D.sev}`, stage: 'D0', sla: '进行中', st: '进行中',
+  try {
+    const created = (await ncmApi.create8d({
+      issue: new8D.issue.trim(),
+      source: new8D.src,
+      severity: `S=${new8D.sev}`,
+      team: new8D.owner,
+      flowType: 'complete',
+    })) as any
+    await loadList()
+    selectedId.value = created.id
+    create8DVisible.value = false
+    const sug = d0Suggestion()
+    ElMessage.success(`8D 已发起（${created.d8No}），D0 前评估完成：${sug.text}`)
+  } catch (e: any) {
+    ElMessage.error('发起失败：' + (e?.response?.data?.message || ''))
   }
-  list.value.unshift(item)
-  selectedId.value = id
-  create8DVisible.value = false
-  const sug = d0Suggestion()
-  ElMessage.success(`${id} 已创建，D0 前评估完成：${sug.text}`)
 }
 
 /* ============ CAPA 触发方式（默认手动，SR-PTL-019） ============ */
@@ -136,46 +318,143 @@ function openCapa() {
   newCapa.trigger = 'S≥7'
   capaVisible.value = true
 }
-function confirmCapa() {
+async function confirmCapa() {
   if (!newCapa.owner.trim()) { ElMessage.warning('请指定 CAPA 责任人'); return }
   if (!newCapa.due) { ElMessage.warning('请设置目标完成日期'); return }
-  const id = `CAPA-2026-${String(12 + capaList.value.length).padStart(3, '0')}`
-  capaList.value.unshift({
-    id, from8D: selected.value!.id, trigger: newCapa.trigger,
-    reason: newCapa.reason, owner: newCapa.owner.trim(), due: newCapa.due,
-    st: '执行中', createdAt: new Date().toISOString().slice(0, 10),
-  })
-  capaVisible.value = false
-  ElMessage.success(`${id} 已创建并关联 ${selected.value!.id}`)
+  try {
+    await ncmApi.createCapa({
+      d8Id: selected.value?.id,
+      issue: newCapa.reason,
+      triggerType: newCapa.trigger,
+      owner: newCapa.owner.trim(),
+      dueDate: newCapa.due,
+      capaType: '纠正',
+      progress: 0,
+      status: '待启动',
+    })
+    await loadList()
+    capaVisible.value = false
+    ElMessage.success('CAPA 已创建并关联')
+  } catch (e) {
+    ElMessage.error('CAPA 创建失败')
+  }
 }
 
 function capaStType(st: string) {
   return st === '已关闭' ? 'success' : st === '待启动' ? 'info' : 'warning'
 }
 
-/* ============ 详情表单 ============ */
-const forms = reactive({ ...ncm8DForms })
-const d6 = ref('')
-const d7 = ref('')
+/* ============ 详情表单（按阶段动态：当前阶段可编辑，已完成只读，未开始隐藏） ============ */
+const ALL_STAGES = ['D1', 'D2', 'D3', 'D4', 'D5', 'D6', 'D7', 'D8']
+const STAGE_TITLES: Record<string, string> = {
+  D1: 'D1 组建团队（Team / 职责）',
+  D2: 'D2 问题描述（5W2H，可预填自不良）',
+  D3: 'D3 临时措施（SLA 24h · 需审批）',
+  D4: 'D4 根因分析（鱼骨图 / 5Why）',
+  D5: 'D5 永久纠正措施（SLA 7天 · 需审批）',
+  D6: 'D6 实施与验证（SLA 30天）',
+  D7: 'D7 预防措施（标准化 / 防再发）',
+  D8: 'D8 表彰与结案',
+}
+function stageContent(code: string): string {
+  const s = detail.value.stages.find((x) => x.stageCode?.toUpperCase() === code.toUpperCase())
+  return s?.content ?? ''
+}
+/** 各阶段编辑内容（同一时刻仅"当前阶段"可写，其余只读或隐藏） */
+const stageForms = reactive<Record<string, string>>({
+  D1: '', D2: '', D3: '', D4: '', D5: '', D6: '', D7: '', D8: '',
+})
 
-function submitD5() {
-  if (!forms.d5.trim()) { ElMessage.warning('D5 纠正措施不可为空'); return }
-  ElMessage.success('D5 纠正措施已提交，进入质量主管审批（SLA 7 天）')
+/** 8D 根因分析报告区 tab */
+const reportTab = ref<1 | 2 | 3>(1)  // 1=鱼骨图 2=5Why 链 3=原始数据
+const reportRef = ref<HTMLElement | null>(null)
+function scrollToReport() {
+  reportTab.value = 1
+  reportRef.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+/** 报告摘要：根因结论 / 原因总数 / 涉及类别 / 追问层数 */
+const reportSummary = computed(() => {
+  const totalCauses = fishboneData.value.reduce(
+    (s, c) => s + c.causes.filter((x) => x.trim()).length, 0,
+  )
+  const filledCats = fishboneData.value.filter((c) => c.causes.some((x) => x.trim())).length
+  const root = fiveWhyItems.value[fiveWhyItems.value.length - 1]?.answer?.trim() || '（未识别根因）'
+  const layers = fiveWhyItems.value.length
+  return { totalCauses, filledCats, root, layers }
+})
+watch(detail, () => {
+  ALL_STAGES.forEach((c) => {
+    const saved = stageContent(c)
+    stageForms[c] = c === 'D1' && !saved ? detail.value.team : saved
+    if (c === 'D4') restoreD4Tools(saved)
+  })
+}, { deep: true, immediate: true })
+
+/** 阶段状态：done=已完成(只读) / current=进行中(可编辑) / future=未开始(隐藏) */
+function stageState(code: string): 'done' | 'current' | 'future' {
+  const d = selected.value
+  if (d?.st === '已闭环') return 'done'
+  const cur = String(d?.stage || 'D1').toUpperCase()
+  const ci = ALL_STAGES.indexOf(cur)
+  const i = ALL_STAGES.indexOf(code)
+  if (ci < 0) return 'future'
+  if (i < ci) return 'done'
+  if (i === ci) return 'current'
+  return 'future'
+}
+
+/** 推进时保存的"当前阶段"内容（D4 返回 JSON，其余返回文本） */
+function advanceContent(): string {
+  const cur = String(selected.value?.stage || 'D1').toUpperCase()
+  if (cur === 'D4') return serializeD4Tools()
+  return stageForms[cur] ?? ''
+}
+function nextStageName(): string {
+  const d = selected.value
+  if (!d || !d.stage) return '推进阶段'
+  if (d.st === '已闭环') return '已完成闭环'
+  const idx = D8_STAGES.findIndex((s) => s.d === d.stage)
+  if (idx < 0) return '推进阶段'
+  const nxt = D8_STAGES[idx + 1]
+  return nxt ? `保存并推进到 ${nxt.name}` : '保存并关闭 8D'
+}
+async function advanceCurrent() {
+  const d = selected.value
+  if (!d) return
+  if (d.st === '已闭环') { ElMessage.info('已完成闭环'); return }
+  try {
+    await ncmApi.advanceStage(d.id, d.stage, advanceContent(), d.owner || '系统')
+    ElMessage.success(`已推进 ${d.stage}`)
+    await loadList()
+    await loadDetail(d.id)
+  } catch (e) {
+    ElMessage.error('推进失败')
+  }
 }
 function startVerify() {
-  ElMessage.success('效果验证期 30 天已启动，跟踪同类不良趋势（SR-PTL-020）')
+  advanceCurrent()
 }
-function linkTools() {
-  ElMessage.info('已关联鱼骨图 / 5Why（演示）')
-}
-
 /* ============ 审批 ============ */
 const approvers = [
   { name: '质量经理', role: '8D 审核', status: 'pending' as const },
   { name: '厂长', role: '关闭批准', status: 'pending' as const },
 ]
-function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
-  ElMessage.success(d.decision === 'approve' ? '8D 已审核通过' : '已驳回，退回责任人')
+async function onApprove(d: { decision: 'approve' | 'reject'; comment: string; sign?: string }) {
+  const cur = selected.value
+  if (!cur) return
+  try {
+    await ncmApi.approveStage(cur.id, {
+      stageCode: cur.stage,
+      approved: d.decision === 'approve',
+      comment: d.comment,
+      approver: (d.sign ? d.sign.split(' · ')[0] : '') || cur.owner || '审批人',
+    })
+    ElMessage.success(d.decision === 'approve' ? '8D 已审核通过' : '已驳回，退回责任人')
+    await loadDetail(cur.id)
+  } catch (e) {
+    ElMessage.error('审批提交失败')
+  }
 }
 </script>
 
@@ -195,6 +474,7 @@ function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
         <h3>8D 整改报告列表</h3>
         <el-tag size="small" effect="plain" type="info">一键发起（不良 / SPC 报警 / 客诉）</el-tag>
         <div class="grow"></div>
+        <el-button size="small" @click="loadList">刷新</el-button>
         <el-button type="primary" size="small" @click="openCreate8D">+ 发起 8D</el-button>
       </div>
       <div class="qms-card__body" style="padding: 0">
@@ -203,7 +483,7 @@ function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
           highlight-current-row :current-row-key="selectedId" row-key="id"
           @row-click="selectRow"
         >
-          <el-table-column prop="id" label="编号" width="130" />
+          <el-table-column prop="d8No" label="编号" width="130" />
           <el-table-column prop="issue" label="问题" min-width="130" />
           <el-table-column prop="src" label="来源" width="100" />
           <el-table-column label="严重度" width="90" align="center">
@@ -230,7 +510,7 @@ function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
     <!-- 8D 详情 -->
     <div v-if="selected" class="qms-card">
       <div class="qms-card__header">
-        <h3>8D 详情 · {{ selected.id }} {{ selected.issue }}</h3>
+        <h3>8D 详情 · {{ selected.d8No }} {{ selected.issue }}</h3>
         <el-tag size="small" type="warning" effect="light">{{ selected.stage }} · {{ selected.st }}</el-tag>
         <div class="grow"></div>
         <el-tag v-if="sevNum(selected.sev) >= 7" size="small" type="danger" effect="dark">
@@ -251,38 +531,142 @@ function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
         </div>
 
         <div class="meta-row">
-          来源：{{ selected.src }} · 团队：{{ ncm8DTeam.join('、') }} · SLA：D3≤24h / D4-D5≤7天 / D6-D7≤30天
+          来源：{{ sourceLabel || selected.src || '—' }}
+          <el-link
+            v-if="detail.sourceRefId && (detail.source === 'SQM异常' || detail.source === '供应商异常')"
+            type="primary" :underline="false" class="src-link"
+            @click="goSource(detail.sourceRefId)"
+          >溯源异常单</el-link>
+          · 团队：{{ ncm8DTeam.join('、') }} · SLA：D3≤24h / D4-D5≤7天 / D6-D7≤30天
         </div>
 
-        <!-- D2-D5 表单 -->
+        <!-- D1-D8 可视化流程面板（含各阶段负责人/计划/审批/证据） -->
+        <EightDBoard v-if="boardData" :data="boardData" @select-stage="onBoardStage" />
+
+        <!-- 按阶段推进的 8D 表单（当前阶段可编辑，已完成只读，未开始隐藏） -->
         <div class="form-grid">
-          <div class="form-row">
-            <label>D2 问题描述（5W2H，预填自不良）</label>
-            <el-input v-model="forms.problem" type="textarea" :rows="2" readonly />
-          </div>
-          <div class="form-row">
-            <label>D3 临时措施（SLA 24h · 已审批）</label>
-            <el-input v-model="forms.d3" type="textarea" :rows="2" readonly />
-          </div>
-          <div class="form-row">
-            <label>D4 根因分析（鱼骨图 / 5Why）</label>
-            <el-input v-model="forms.d4" type="textarea" :rows="2" readonly />
-          </div>
-          <div class="form-row">
-            <label>D5 纠正措施（SLA 7天 · 待质量主管审批）<span class="req">*</span></label>
-            <el-input v-model="forms.d5" type="textarea" :rows="2" placeholder="填写永久措施，需含责任人与时间节点" />
+          <div
+            v-for="code in ALL_STAGES"
+            v-show="stageState(code) !== 'future'"
+            :key="code"
+            class="form-row"
+            :class="[stageState(code), { 'is-d4': code === 'D4' }]"
+          >
+            <label>
+              {{ STAGE_TITLES[code] }}
+              <span class="stage-tag" :class="stageState(code)">
+                {{ stageState(code) === 'done' ? '已完成' : stageState(code) === 'current' ? '进行中' : '' }}
+              </span>
+            </label>
+
+            <!-- D4 根因分析：current 用流程式向导；done 简化为入口提示（在底部报告区查看） -->
+            <template v-if="code === 'D4'">
+              <D4Wizard
+                v-if="stageState(code) === 'current'"
+                v-model:fishbone="fishboneData"
+                v-model:fiveWhy="fiveWhyItems"
+                :problem="selected?.issue"
+              />
+              <div v-else class="d4-summary">
+                <el-icon class="d4-summary__icon"><i-ep-document /></el-icon>
+                <div class="d4-summary__txt">
+                  <div class="d4-summary__title">根因分析已完成</div>
+                  <div class="d4-summary__desc">
+                    共录入 {{ fishboneData.reduce((s, c) => s + c.causes.filter((x) => x.trim()).length, 0) }} 个可能原因
+                    /
+                    5Why 共 {{ fiveWhyItems.length }} 层
+                    ／
+                    <a class="d4-summary__link" @click="scrollToReport">↓ 查看根因分析报告</a>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- 非 D4 阶段：纯文本 textarea -->
+            <el-input
+              v-else
+              v-model="stageForms[code]"
+              type="textarea"
+              :autosize="{ minRows: 2, maxRows: 8 }"
+              :readonly="stageState(code) !== 'current'"
+              :placeholder="stageState(code) === 'current' ? '填写本阶段内容（含责任人与时间节点）' : '已完成，仅可查看'"
+            />
           </div>
         </div>
+        <div class="form-hint">
+          提示：8D 按 D1→D8 顺序推进。当前仅「进行中」的阶段可编辑，填写后点击「推进阶段」保存并进入下一阶段；已完成的阶段只读展示。
+        </div>
 
-        <!-- 根因分析工具 -->
-        <div class="chart-grid chart-grid--2">
-          <div class="sub-card">
-            <div class="sub-card__title">鱼骨图（5M1E）</div>
-            <FishboneDiagram :data="ncm8D.fishbone" :problem="selected.issue" />
+        <!-- 根因分析报告（分块 tab） -->
+        <div ref="reportRef" class="report-block">
+          <div class="report-head">
+            <div class="report-title">根因分析报告</div>
+            <div class="report-summary">
+              <div class="kpi">
+                <div class="kpi-label">根本原因</div>
+                <div class="kpi-val root">{{ reportSummary.root }}</div>
+              </div>
+              <div class="kpi">
+                <div class="kpi-label">可能原因数</div>
+                <div class="kpi-val">{{ reportSummary.totalCauses }}</div>
+              </div>
+              <div class="kpi">
+                <div class="kpi-label">涉及类别</div>
+                <div class="kpi-val">{{ reportSummary.filledCats }} / 6</div>
+              </div>
+              <div class="kpi">
+                <div class="kpi-label">5Why 层数</div>
+                <div class="kpi-val">{{ reportSummary.layers }}</div>
+              </div>
+            </div>
           </div>
-          <div class="sub-card">
-            <div class="sub-card__title">5Why 根因追问</div>
-            <FiveWhyEditor :items="ncm8D.fiveWhy" :editable="false" />
+
+          <div class="report-tabs">
+            <button :class="['tab', { on: reportTab === 1 }]" @click="reportTab = 1">
+              ① 鱼骨图
+            </button>
+            <button :class="['tab', { on: reportTab === 2 }]" @click="reportTab = 2">
+              ② 5Why 链
+            </button>
+            <button :class="['tab', { on: reportTab === 3 }]" @click="reportTab = 3">
+              ③ 原始数据
+            </button>
+          </div>
+
+          <div class="report-body">
+            <div v-if="reportTab === 1" class="tab-pane">
+              <FishboneDiagram :data="fishboneData" :problem="selected?.issue" mode="view" />
+            </div>
+            <div v-else-if="reportTab === 2" class="tab-pane">
+              <FiveWhyEditor :items="fiveWhyItems" :problem="selected?.issue" mode="view" />
+            </div>
+            <div v-else class="tab-pane raw-pane">
+              <table class="raw-table">
+                <thead>
+                  <tr><th style="width: 100px">类别</th><th>可能原因（5M1E）</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="c in fishboneData" :key="c.category">
+                    <td><span class="cat-pill" :style="{ background: ({人:'#5b8def',机:'#1e4d8b',料:'#16a085',法:'#d4a017',环:'#8e44ad',测:'#c0392b'})[c.category] }">{{ c.category }}</span></td>
+                    <td>
+                      <span v-if="!c.causes.length" class="muted">（未填写）</span>
+                      <span v-else class="cause-list">
+                        <span v-for="(cs, i) in c.causes.filter((x) => x.trim())" :key="i" class="cause-item">{{ cs }}</span>
+                      </span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+              <div v-if="fiveWhyItems.length" class="raw-why">
+                <h4>5Why 追问链</h4>
+                <div v-for="(w, i) in fiveWhyItems" :key="i" class="raw-why-row">
+                  <span class="raw-why-num">第 {{ i + 1 }} 层</span>
+                  <span class="raw-why-q">为什么？{{ w.why || '—' }}</span>
+                  <span class="raw-why-a">因为：{{ w.answer || '—' }}</span>
+                </div>
+                <div v-if="reportSummary.root" class="raw-root">根本原因：{{ reportSummary.root }}</div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -294,8 +678,7 @@ function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
 
         <!-- 操作按钮 -->
         <div class="btn-bar">
-          <el-button type="primary" @click="submitD5">提交 D5 审批</el-button>
-          <el-button @click="linkTools">关联分析工具</el-button>
+          <el-button type="primary" :disabled="!selected || isClosed" @click="advanceCurrent">{{ nextStageName() }}</el-button>
           <el-button
             v-if="!linkedCapa.length" type="danger" plain
             :disabled="sevNum(selected.sev) < 7" @click="openCapa"
@@ -344,7 +727,7 @@ function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
       </div>
     </div>
 
-    <!-- D6-D7 实施与预防 -->
+    <!-- D6-D7 实施与预防（同样遵循阶段门控：当前阶段可编辑） -->
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>D6-D7 实施与预防</h3>
@@ -352,16 +735,34 @@ function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
       </div>
       <div class="qms-card__body">
         <div class="form-grid">
-          <div class="form-row">
-            <label>D6 措施实施记录 + 证据附件（强制）<span class="req">*</span></label>
-            <el-input v-model="d6" type="textarea" :rows="2" placeholder="实施情况、更换零部件、验收结果..." />
+          <div class="form-row" :class="stageState('D6')">
+            <label>
+              D6 措施实施记录 + 证据附件（强制）<span class="req">*</span>
+              <span class="stage-tag" :class="stageState('D6')">
+                {{ stageState('D6') === 'done' ? '已完成' : stageState('D6') === 'current' ? '进行中' : '' }}
+              </span>
+            </label>
+            <el-input
+              v-model="stageForms.D6" type="textarea" :rows="2"
+              :readonly="stageState('D6') !== 'current'"
+              placeholder="实施情况、更换零部件、验收结果..."
+            />
             <el-upload action="#" :auto-upload="false" :limit="3" style="margin-top: 6px">
               <el-button size="small">上传证据附件</el-button>
             </el-upload>
           </div>
-          <div class="form-row">
-            <label>D7 预防措施 + 系统性改进评估（需审批）</label>
-            <el-input v-model="d7" type="textarea" :rows="2" placeholder="修订 SOP / 保养计划 / 防错装置..." />
+          <div class="form-row" :class="stageState('D7')">
+            <label>
+              D7 预防措施 + 系统性改进评估（需审批）
+              <span class="stage-tag" :class="stageState('D7')">
+                {{ stageState('D7') === 'done' ? '已完成' : stageState('D7') === 'current' ? '进行中' : '' }}
+              </span>
+            </label>
+            <el-input
+              v-model="stageForms.D7" type="textarea" :rows="2"
+              :readonly="stageState('D7') !== 'current'"
+              placeholder="修订 SOP / 保养计划 / 防错装置..."
+            />
           </div>
         </div>
         <el-alert
@@ -565,6 +966,42 @@ function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
     margin-bottom: 5px;
     .req { color: #c0392b; margin-left: 2px; }
   }
+  &.current {
+    label { color: #1e4d8b; font-weight: 600; }
+  }
+  &.done {
+    opacity: 0.92;
+    :deep(.el-textarea__inner) {
+      background: #f6f9fd;
+      color: #5a6b7e;
+    }
+  }
+  &.is-d4 {
+    grid-column: 1 / -1;
+    background: #f4f8ff;
+    border: 1px solid #dbe7f7;
+    border-radius: 8px;
+    padding: 10px 14px;
+  }
+}
+.stage-tag {
+  display: inline-block;
+  margin-left: 8px;
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 8px;
+  vertical-align: middle;
+  &.current { color: #1e4d8b; background: #e3efff; }
+  &.done { color: #2e7d32; background: #e6f4ea; }
+}
+.form-hint {
+  font-size: 12px;
+  color: #7a8aa0;
+  background: #f6f9fd;
+  border: 1px dashed #d6e2f0;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 12px 0 4px;
 }
 
 .chart-grid {
@@ -572,6 +1009,128 @@ function onApprove(d: { decision: 'approve' | 'reject'; comment: string }) {
   gap: 14px;
   margin-top: 16px;
   &--2 { grid-template-columns: 1fr 1fr; }
+}
+.d4-tools {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  &.readonly { opacity: 0.92; }
+  .sub-card { margin: 0; }
+  .sub-card__title { margin-bottom: 8px; }
+}
+.d4-summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #f4f8ff;
+  border: 1px dashed #1e4d8b;
+  border-radius: 6px;
+  padding: 10px 14px;
+  &__icon { color: #1e4d8b; font-size: 22px; }
+  &__title { font-size: 13px; font-weight: 600; color: #1e4d8b; }
+  &__desc { font-size: 12px; color: #5a6b7e; margin-top: 2px; }
+  &__link { color: #1e4d8b; cursor: pointer; text-decoration: underline; margin-left: 4px; }
+}
+
+/* 8D 根因分析报告块 */
+.report-block {
+  margin-top: 16px;
+  border: 1px solid #dbe7f7;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+.report-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 16px;
+  background: linear-gradient(135deg, #1e4d8b, #2c5da9);
+  color: #fff;
+  flex-wrap: wrap;
+}
+.report-title { font-size: 14px; font-weight: 600; }
+.report-summary { display: flex; gap: 12px; flex: 1; justify-content: flex-end; flex-wrap: wrap; }
+.kpi {
+  background: rgba(255,255,255,0.12);
+  border-radius: 6px;
+  padding: 4px 10px;
+  min-width: 90px;
+  &-label { font-size: 10px; opacity: 0.8; }
+  &-val { font-size: 13px; font-weight: 600; word-break: break-all; }
+  &-val.root { color: #ffd54f; }
+}
+.report-tabs {
+  display: flex;
+  background: #f4f8ff;
+  border-bottom: 1px solid #dbe7f7;
+  .tab {
+    flex: 0 0 auto;
+    border: none;
+    background: transparent;
+    color: #5a6b7e;
+    font-size: 12.5px;
+    padding: 8px 16px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    transition: all 0.15s;
+    &:hover { color: #1e4d8b; }
+    &.on {
+      color: #1e4d8b;
+      background: #fff;
+      border-bottom-color: #1e4d8b;
+      font-weight: 600;
+    }
+  }
+}
+.report-body { padding: 12px 14px; }
+.tab-pane { min-height: 60px; }
+.raw-pane { font-size: 12px; }
+.raw-table {
+  width: 100%;
+  border-collapse: collapse;
+  th, td { padding: 6px 8px; border-bottom: 1px solid #eef3fa; text-align: left; vertical-align: top; }
+  th { background: #f4f8ff; color: #1e4d8b; font-weight: 600; }
+}
+.cat-pill {
+  display: inline-block;
+  width: 24px; height: 24px; line-height: 24px;
+  text-align: center; color: #fff; border-radius: 4px;
+  font-size: 12px; font-weight: 600;
+}
+.cause-list { display: flex; flex-wrap: wrap; gap: 4px; }
+.cause-item {
+  background: #f4f8ff;
+  color: #1e4d8b;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11.5px;
+}
+.muted { color: #b0bac4; font-style: italic; }
+.raw-why {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed #dbe7f7;
+  h4 { font-size: 12.5px; color: #1e4d8b; margin-bottom: 6px; }
+}
+.raw-why-row {
+  display: grid;
+  grid-template-columns: 50px 1fr 1fr;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 12px;
+  &-num { color: #1e4d8b; font-weight: 600; }
+  &-q { color: #1e4d8b; }
+  &-a { color: #16a085; }
+}
+.raw-root {
+  margin-top: 8px;
+  background: #c0392b;
+  color: #fff;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 600;
 }
 .sub-card {
   border: 1px solid #e8eff7;

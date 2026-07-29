@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue'
+import { ref, reactive, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
-import { internalAudits, ncFindings } from '@/mock/qsm'
+import { BANNERS } from '@/config/banners'
+import { qsmApi } from '@/api'
 import type { InternalAudit, NcFinding } from '@/types/qsm'
 
 const authStore = useAuthStore()
@@ -12,8 +12,8 @@ const banner = BANNERS.qsm?.[authStore.role] || {
   desc: '内审计划、不符合项整改闭环与报表生成',
 }
 
-const audits = ref<InternalAudit[]>(JSON.parse(JSON.stringify(internalAudits)))
-const findings = ref<NcFinding[]>(JSON.parse(JSON.stringify(ncFindings)))
+const audits = ref<InternalAudit[]>([])
+const findings = ref<NcFinding[]>([])
 
 const auditStMap: Record<string, string> = { 计划中: 'y', 进行中: 'b', 已完成: 'g' }
 const ncStMap: Record<string, string> = { 待整改: 'r', 整改中: 'b', 已验证: 'p', 已关闭: 'g' }
@@ -23,9 +23,16 @@ function ncPill(s: string) { return ncStMap[s] || 'y' }
 function lvlPill(s: string) { return lvlMap[s] || 'y' }
 
 // 选中内审 → 展开其不符合项
-const selectedAudit = ref<string>(audits.value[0]?.id || '')
+const selectedAudit = ref<string>('')
 const auditFindings = computed(() => findings.value.filter((f) => f.auditId === selectedAudit.value))
 function selectAudit(a: InternalAudit) { selectedAudit.value = a.id }
+
+onMounted(async () => {
+  const [a, f] = await Promise.all([qsmApi.getAudits(), qsmApi.getNcFindings()])
+  audits.value = a
+  findings.value = f
+  selectedAudit.value = a[0]?.id || ''
+})
 
 // 新建内审计划
 const planVisible = ref(false)
@@ -92,7 +99,6 @@ function closeNc(f: NcFinding) { f.status = '已关闭'; ElMessage.success('不�
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>内审计划</h3>
-        <span class="sr-tag">SR-QSM-007</span><span class="sr-tag">SR-QSM-008</span><span class="sr-tag">SR-QSM-011</span>
         <div style="margin-left:auto"><el-button size="small" type="primary" @click="openPlan">新建内审计划</el-button></div>
       </div>
       <div class="qms-card__body" style="padding: 0">
@@ -122,8 +128,7 @@ function closeNc(f: NcFinding) { f.status = '已关闭'; ElMessage.success('不�
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>不符合项整改闭环 · {{ selectedAudit }}</h3>
-        <span class="sr-tag">SR-QSM-009</span><span class="sr-tag">SR-QSM-010</span>
-      </div>
+        </div>
       <div class="qms-card__body" style="padding: 0">
         <el-table :data="auditFindings" border size="small">
           <el-table-column prop="id" label="编号" width="120" />

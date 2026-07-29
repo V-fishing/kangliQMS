@@ -1,19 +1,39 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { useDictStore } from '@/stores/dict'
+import { BANNERS } from '@/config/banners'
 import SchemaForm from '@/components/form/SchemaForm.vue'
-import { ncmDict as seedDict, ncmDictCats } from '@/mock/ncm'
+import { ncmApi } from '@/api'
 
 const authStore = useAuthStore()
+const dictStore = useDictStore()
 const banner = BANNERS.ncm?.[authStore.role] || {
   title: 'NCM · 不良字典',
   desc: '不良类别与不良代码维护（SR-NCM-005）',
 }
 
 /** 不良字典数据（编码全局唯一 · 停用不可复用） */
-const list = ref<Record<string, unknown>[]>(seedDict.map((d) => ({ ...d })))
+const list = ref<Record<string, unknown>[]>([])
+
+/** 分类/等级选项统一取自系统字典 sys_dict（ncm_defect_category / severity），
+ *  避免「库内无字典时下拉为空、无法录入首条」的鸡生蛋问题，并与全系统保持一致 */
+
+/** 加载字典数据 */
+const loading = ref(false)
+async function loadDict() {
+  loading.value = true
+  try {
+    const data = await ncmApi.getDict()
+    list.value = data.map((d) => ({ ...d }))
+  } catch (e) {
+    list.value = []
+  } finally {
+    loading.value = false
+  }
+}
+onMounted(loadDict)
 
 /** 筛选条件 */
 const fCat = ref('')
@@ -32,27 +52,49 @@ const filtered = computed(() => {
 /** 编辑弹窗 */
 const dialog = ref(false)
 const isEdit = ref(false)
-const schema = [
+const schema = computed(() => [
   { prop: 'code', label: '不良代码', type: 'input', required: true, placeholder: '如 D006', span: 12 },
   { prop: 'name', label: '不良名称', type: 'input', required: true, placeholder: '如 毛边', span: 12 },
-  { prop: 'cat', label: '分类', type: 'select', required: true, options: ncmDictCats.map((c) => ({ label: c, value: c })), span: 12 },
-  { prop: 'lvl', label: '严重等级', type: 'select', required: true, options: [{ label: '一般', value: '一般' }, { label: '严重', value: '严重' }], span: 12 },
-]
+  { prop: 'cat', label: '分类', type: 'select', required: true, options: dictStore.defectCategories, span: 12 },
+  { prop: 'lvl', label: '严重等级', type: 'select', required: true, options: dictStore.severities, span: 12 },
+])
 const model = ref<Record<string, unknown>>({})
 function openAdd() { isEdit.value = false; model.value = { status: '启用' }; dialog.value = true }
-function openEdit(r: any) { isEdit.value = false; model.value = { ...r }; dialog.value = true }
-function onSubmit(v: Record<string, unknown>) {
-  const idx = list.value.findIndex((x: any) => x.code === v.code)
-  if (idx >= 0) list.value[idx] = { ...list.value[idx], ...v }
-  else list.value.unshift({ ...v, cnt: 0, status: '启用' } as any)
-  dialog.value = false
-  ElMessage.success('不良代码已保存')
+function openEdit(r: any) { isEdit.value = true; model.value = { ...r }; dialog.value = true }
+async function onSubmit(v: Record<string, unknown>) {
+  // 前端字段 cat/lvl → 后端 category/level
+  const payload: Record<string, unknown> = {
+    code: v.code,
+    name: v.name,
+    category: v.cat,
+    level: v.lvl,
+    status: v.status ?? '启用',
+  }
+  try {
+    if (v.id) {
+      await ncmApi.updateDict(String(v.id), payload)
+    } else {
+      await ncmApi.createDict(payload)
+    }
+    dialog.value = false
+    ElMessage.success('不良代码已保存')
+    await loadDict()
+  } catch (e: any) {
+    ElMessage.error(e?.msg || e?.message || '保存失败')
+  }
 }
 
 /** 停用 / 启用（有统计数不可删除，仅可停用，HTML 规则） */
-function toggleStatus(r: any) {
-  r.status = r.status === '启用' ? '停用' : '启用'
-  ElMessage.success(`已${r.status === '启用' ? '启用' : '停用'} ${r.code}`)
+async function toggleStatus(r: any) {
+  if (!r.id) { ElMessage.error('缺少后端标识，无法更新'); return }
+  const next = r.status === '启用' ? '停用' : '启用'
+  try {
+    await ncmApi.updateDict(r.id, { status: next })
+    ElMessage.success(`已${next} ${r.code}`)
+    await loadDict()
+  } catch (e: any) {
+    ElMessage.error(e?.msg || e?.message || '状态更新失败')
+  }
 }
 /** 删除：仅当统计数为 0 时允许 */
 function remove(r: any) {
@@ -60,11 +102,17 @@ function remove(r: any) {
     ElMessage.warning('有统计数据，不可删除，仅可停用')
     return
   }
+  if (!r.id) { ElMessage.error('缺少后端标识，无法删除'); return }
   ElMessageBox.confirm(`确认删除不良代码 ${r.code}（${r.name}）？`, '删除确认', {
     type: 'warning',
-  }).then(() => {
-    list.value = list.value.filter((x: any) => x.code !== r.code)
-    ElMessage.success('已删除')
+  }).then(async () => {
+    try {
+      await ncmApi.deleteDict(r.id)
+      ElMessage.success('已删除')
+      await loadDict()
+    } catch (e: any) {
+      ElMessage.error(e?.msg || e?.message || '删除失败')
+    }
   }).catch(() => {})
 }
 
@@ -96,11 +144,10 @@ function importExcel() { ElMessage.success('导入校验完成（演示）') }
       <div class="qms-card__body">
         <div class="filter-bar">
           <el-select v-model="fCat" placeholder="全部分类" clearable style="width: 150px">
-            <el-option v-for="c in ncmDictCats" :key="c" :label="c" :value="c" />
+            <el-option v-for="c in dictStore.defectCategories" :key="c.value" :label="c.label" :value="c.value" />
           </el-select>
           <el-select v-model="fLvl" placeholder="全部等级" clearable style="width: 130px">
-            <el-option label="严重" value="严重" />
-            <el-option label="一般" value="一般" />
+            <el-option v-for="s in dictStore.severities" :key="s.value" :label="s.label" :value="s.value" />
           </el-select>
           <el-input v-model="fQ" placeholder="搜索编码 / 名称" clearable style="width: 200px" />
           <span class="sp" />

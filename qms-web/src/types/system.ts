@@ -18,6 +18,7 @@ export interface SysUser {
 export interface SysOrg {
   id: string
   name: string
+  code?: string
   parentId: string
   type: 'company' | 'dept' | 'team'
   leader?: string

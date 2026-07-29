@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
+useChartResize(() => [pieInst])
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { BANNERS } from '@/config/banners'
 import KpiCard from '@/components/common/KpiCard.vue'
 import { gauges, calibPlans } from '@/mock/msm'
 
@@ -57,6 +59,7 @@ onBeforeUnmount(() => { pieInst?.dispose() })
 
 <template>
   <div class="msm-dash">
+    <el-alert type="warning" show-icon :closable="false" title="此模块后端尚未实现，当前为演示数据（@backend-pending）" style="margin-bottom:12px" />
     <div class="qms-banner">
       <div class="qms-banner__icon" :style="{ background: authStore.currentRole?.color }">📐</div>
       <div>
@@ -76,11 +79,11 @@ onBeforeUnmount(() => { pieInst?.dispose() })
 
     <div class="chart-grid chart-grid--2">
       <div class="qms-card">
-        <div class="qms-card__header"><h3>器具状态分布</h3><span class="sr-tag">SR-MSM-001</span></div>
+        <div class="qms-card__header"><h3>器具状态分布</h3></div>
         <div class="qms-card__body"><div ref="pieRef" class="chart-container"></div></div>
       </div>
       <div class="qms-card">
-        <div class="qms-card__header"><h3>使用控制（防错绑定）</h3><span class="sr-tag">SR-MSM-008</span></div>
+        <div class="qms-card__header"><h3>使用控制（防错绑定）</h3></div>
         <div class="qms-card__body">
           <div class="use-ctrl">
             <div class="uc-item ok">

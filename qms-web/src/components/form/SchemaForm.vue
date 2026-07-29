@@ -23,11 +23,13 @@ const props = withDefaults(defineProps<{
   labelWidth?: string
   rules?: Record<string, unknown>
   readonly?: boolean
+  hideActions?: boolean
 }>(), {
   modelValue: () => ({}),
   labelWidth: '100px',
   rules: () => ({}),
   readonly: false,
+  hideActions: false,
 })
 
 const emit = defineEmits<{
@@ -152,7 +154,7 @@ defineExpose({ validate, submit, reset, formData })
         </el-form-item>
       </el-col>
     </el-row>
-    <el-form-item v-if="!readonly">
+    <el-form-item v-if="!readonly && !hideActions">
       <el-button type="primary" @click="submit">提交</el-button>
       <el-button @click="reset">重置</el-button>
     </el-form-item>

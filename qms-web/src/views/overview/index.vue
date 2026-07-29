@@ -3,8 +3,8 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useAuthStore } from '@/stores/auth'
 import { useCompanyStore } from '@/stores/company'
 import { overviewApi } from '@/api'
-import { BANNERS } from '@/mock/roles'
-import { COMPANY_KPI } from '@/mock/company'
+import type { OverviewTodo, OverviewAlert } from '@/api/modules/overview'
+import { BANNERS } from '@/config/banners'
 import KpiCard from '@/components/common/KpiCard.vue'
 import TodoList from '@/components/common/TodoList.vue'
 import TrendChart from '@/components/charts/TrendChart.vue'
@@ -16,74 +16,42 @@ const companyStore = useCompanyStore()
 
 const kpiData = ref<KpiData[]>([])
 const trendData = ref({ days: [] as string[], passRate: [] as number[], defectRate: [] as number[] })
-const todos = ref<{ id: string; title: string; module: string; priority: 'high' | 'medium' | 'low'; time: string }[]>([])
-const alerts = ref<{ id: string; type: string; msg: string; time: string; level: string }[]>([])
+const todos = ref<OverviewTodo[]>([])
+const alerts = ref<OverviewAlert[]>([])
 
 const ctxLabel = computed(() => companyStore.contextLabel())
 const isGroup = computed(() => companyStore.isGroup)
-
-/** 当前视图所用 KPI（单公司按所选、集团视图取所有公司聚合） */
-const kpiForView = computed(() => {
-  if (companyStore.isGroup) {
-    const list = Object.values(COMPANY_KPI)
-    const n = list.length
-    const sum = (key: keyof typeof list[number]) =>
-      +(list.reduce((acc, c) => acc + (c[key] as number), 0) as number)
-    const months = COMPANY_KPI.MZ.monthlyTrend.length
-    return {
-      passRate: +(sum('passRate') / n).toFixed(2),
-      defectRate: +(sum('defectRate') / n).toFixed(2),
-      openNc: sum('openNc'),
-      spcAlarm: sum('spcAlarm'),
-      supplierAbn: sum('supplierAbn'),
-      auditPass: +(sum('auditPass') / n).toFixed(2),
-      monthlyTrend: Array.from({ length: months }, (_, i) =>
-        +(list.reduce((acc, c) => acc + c.monthlyTrend[i], 0) / n).toFixed(2),
-      ),
-    }
-  }
-  return companyStore.kpi() || COMPANY_KPI.MZ
-})
-
-function buildKpi() {
-  const k = kpiForView.value
-  kpiData.value = [
-    { label: '一次交检合格率', value: k.passRate, unit: '%', status: k.passRate >= 98 ? 'ok' : 'warn', sub: '目标 ≥98%' },
-    { label: '不良率', value: k.defectRate, unit: '%', status: k.defectRate <= 2 ? 'ok' : 'warn', sub: '越低越好' },
-    { label: '在制不良', value: k.openNc, unit: '项', status: k.openNc <= 15 ? 'ok' : 'bad', sub: '需跟进' },
-    { label: 'SPC 告警', value: k.spcAlarm, unit: '项', status: k.spcAlarm <= 4 ? 'ok' : 'warn', sub: '过程监控' },
-    { label: '来料异常', value: k.supplierAbn, unit: '项', status: k.supplierAbn <= 6 ? 'ok' : 'warn', sub: '供应商' },
-    { label: '审核通过率', value: k.auditPass, unit: '%', status: k.auditPass >= 92 ? 'ok' : 'warn', sub: '体系' },
-  ]
-  const months = ['1月', '2月', '3月', '4月', '5月', '6月']
-  trendData.value = {
-    days: months,
-    passRate: k.monthlyTrend,
-    defectRate: k.monthlyTrend.map((v) => +(100 - v).toFixed(2)),
-  }
-}
 
 const bannerInfo = computed(() => {
   return BANNERS.overview?.[authStore.role] ?? { title: '工作台', desc: '欢迎使用质量管理系统' }
 })
 
 // 切换公司时同步刷新（RouterView key 也会重挂载，此处作为冗余保险）
-watch(() => companyStore.currentCompanyId, () => buildKpi())
+watch(() => companyStore.currentCompanyId, () => loadAll())
 
 const alertLevelMap: Record<string, string> = {
   alarm: '#c0392b', warn: '#d4a017', info: '#1e4d8b',
 }
 
-onMounted(async () => {
-  buildKpi()
-  todos.value = await overviewApi.getTodos()
-  alerts.value = await overviewApi.getAlerts()
-})
+async function loadAll() {
+  const [kpi, trend, t, a] = await Promise.all([
+    overviewApi.getKpi(),
+    overviewApi.getTrend(),
+    overviewApi.getTodos(),
+    overviewApi.getAlerts(),
+  ])
+  kpiData.value = kpi
+  trendData.value = trend
+  todos.value = t
+  alerts.value = a
+}
+
+onMounted(loadAll)
 
 // 趋势图
 function trendSeries() {
   return [
-    { name: '首件合格率', data: trendData.value.passRate, color: '#2f7d32' },
+    { name: '合格率', data: trendData.value.passRate, color: '#2f7d32' },
     { name: '不良率', data: trendData.value.defectRate, color: '#c0392b' },
   ]
 }
@@ -131,7 +99,7 @@ function moduleColor(module: string) {
     <div class="chart-grid chart-grid--2-1">
       <div class="qms-card">
         <div class="card-h">
-          <h3>近6月质量趋势</h3>
+          <h3>近7日质量趋势</h3>
           <span class="tag g">合格率</span>
           <span class="tag r">不良率</span>
         </div>

@@ -2,7 +2,7 @@
 import { ref, reactive, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useAuthStore } from '@/stores/auth'
-import { BANNERS } from '@/mock/roles'
+import { BANNERS } from '@/config/banners'
 import { gauges, calibPlans } from '@/mock/msm'
 import type { Gauge, CalibPlan, GaugeStatus } from '@/types/msm'
 
@@ -112,7 +112,6 @@ const kpi = computed(() => ({
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>校准计划（到期自动生成）</h3>
-        <span class="sr-tag">SR-MSM-005</span><span class="sr-tag">SR-MSM-006</span>
         <div style="margin-left:auto"><el-button size="small" @click="autoGenPlans">自动生成到期计划</el-button></div>
       </div>
       <div class="qms-card__body" style="padding: 0">
@@ -140,8 +139,6 @@ const kpi = computed(() => ({
     <div class="qms-card">
       <div class="qms-card__header">
         <h3>计量器具台账</h3>
-        <span class="sr-tag">SR-MSM-001</span><span class="sr-tag">SR-MSM-008</span>
-        <span class="sr-tag">SR-MSM-011</span><span class="sr-tag">SR-MSM-013</span>
         <div style="margin-left:auto"><el-button size="small" type="primary" @click="openCreate">器具建档</el-button></div>
       </div>
       <div class="qms-card__body" style="padding: 0">

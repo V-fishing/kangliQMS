@@ -10,6 +10,8 @@ import {
 } from '@/mock/company'
 import type { CompanyId } from '@/types/company'
 import echarts from '@/utils/echarts'
+import { useChartResize } from '@/composables/useChartResize'
+useChartResize(() => [trendInst, radarInst, pieAInst, pieBInst])
 
 const companyStore = useCompanyStore()
 const isGroupAdmin = computed(() => companyStore.isGroupAdmin)
