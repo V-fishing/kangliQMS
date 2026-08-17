@@ -1,4 +1,0 @@
-User-agent: *
-Allow: /
-
-# QMS 质量管理系统前端
